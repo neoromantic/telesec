@@ -1,6 +1,6 @@
 # managed by devkit v1 — change it in neoromantic/devkit templates/telemetry/, not here.
 # Spec: https://github.com/neoromantic/devkit/blob/main/docs/standards/telemetry.md
-"""Anonymous usage telemetry: stdlib only, never raises, never blocks.
+"""Usage telemetry: stdlib only, never raises, never blocks.
 
 create_telemetry(...) returns a client. A CLI calls show_notice(); an app or plugin
 shows notice_text() itself and calls mark_notice_seen(). Then started(), feature(),
@@ -30,7 +30,7 @@ LIB_VERSION = "1"
 NOTICE_VERSION = 1
 NOTICE_URL = "https://usage.sergeybaus.com"
 TIMEOUT = 3.0
-THROTTLED_MODES = ("scheduled", "daemon", "plugin")
+THROTTLED_MODES = ("scheduled", "daemon", "plugin", "script")
 CI_VARS = ("GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI", "TF_BUILD",
            "JENKINS_URL", "TEAMCITY_VERSION", "CODEBUILD_BUILD_ID")
 TEST_VARS = ("PYTEST_CURRENT_TEST", "PYTEST_VERSION")

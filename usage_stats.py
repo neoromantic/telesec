@@ -1,4 +1,4 @@
-"""Usage stats: anonymous, opt-out usage counts through the shared client in ``telemetry.py``.
+"""Usage stats: opt-out usage counts through the shared client in ``telemetry.py``.
 
 Sent to the maintainer (PostHog through https://usage.sergeybaus.com): ``app_started`` when the gateway
 starts, ``feature_used`` with a name from ``FEATURES``, and ``error_occurred`` with an error code only,
@@ -355,7 +355,7 @@ async def _deliver(bot: Any, connection: str, owner_id: Any, language_code: str 
 
 
 def add_parser(subs: Any) -> None:
-    parser = subs.add_parser("telemetry", help="Show or change anonymous usage stats (on unless turned off)")
+    parser = subs.add_parser("telemetry", help="Show or change usage stats (on unless turned off)")
     parser.add_argument("action", nargs="?", choices=("status", "on", "off"), default="status")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument("--json", dest="format", action="store_const", const="json", help="Same as --format json")
