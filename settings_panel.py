@@ -1,4 +1,4 @@
-"""Owner-panel Settings: the switches for transcription, history, dossiers and deletion alerts in all chats.
+"""Owner-panel Settings: the switches for transcription, history, dossiers and deletion alerts in all chats, and usage stats.
 
 Settings opens from the Settings button on any chat's panel, or with `/telesec` in the owner's
 private chat with the bot (chat ``owner_panel.HOME_CHAT``, with no Back row). Only an owner of every
@@ -21,6 +21,7 @@ from . import dossier_view as _dossier_view
 from . import global_settings as _settings
 from . import history_support as _history
 from . import owner_panel as _owner_panel
+from . import usage_stats as _usage
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ RETENTION_PICKER = "r"
 # accepted only while it is in effect, so a forged button cannot store an arbitrary number.
 RETENTION_ARGS = (*(f"r.{days}" for days in _settings.RETENTION_CHOICES),
                   *(f"r.{days}.yes" for days in _settings.RETENTION_CHOICES if days))
-ARGS = (*SWITCH_ARGS, RETENTION_PICKER, *RETENTION_ARGS)
+ARGS = (*SWITCH_ARGS, RETENTION_PICKER, *RETENTION_ARGS, *_usage.PANEL_ARGS)
 _FEATURES = {"t": "transcription", "h": "history", "d": "dossiers", "a": "alerts"}
 _RETENTION_ARG_RE = re.compile(r"^r\.(\d{1,5})(\.yes)?\Z")
 CURRENT_MARK = "• "
@@ -208,6 +209,7 @@ def _apply(ctx: _owner_panel.PanelContext, arg: str) -> str:
         # Telegram never overwrites a corrupt file; `hermes telesec settings set` repairs it.
         logger.warning("%s: could not save settings (%s)", _history.PLUGIN_NAME, type(exc).__name__)
         return _tr("settings.save_error", ctx)
+    _usage.feature("settings changed")
     return _tr(f"settings.done.{arg}", ctx)
 
 
@@ -224,6 +226,7 @@ def _apply_retention(ctx: _owner_panel.PanelContext, days: int) -> str:
     except (_settings.SettingsFileCorrupt, OSError) as exc:
         logger.warning("%s: could not save settings (%s)", _history.PLUGIN_NAME, type(exc).__name__)
         return _tr("settings.save_error", ctx)
+    _usage.feature("settings changed")
     return _tr("settings.retention.done", ctx, value=_retention_value(ctx, days))
 
 
@@ -274,9 +277,11 @@ def _main_view(ctx: _owner_panel.PanelContext, manager: bool, notice: str | None
             if feature == "history":
                 value = _retention_value(ctx, retention)
                 lines.append(f"{_owner_panel.ICONS['retention']} {_tr('settings.status.retention', ctx, value=value)}")
+        lines += _usage.panel_lines(ctx.language_code)
         lines += _model_lines(ctx)
         lines.append(_tr("settings.read_only", ctx))
         return _owner_panel.PanelView(text="\n".join(lines))
+    lines += _usage.panel_lines(ctx.language_code)
     lines += _model_lines(ctx)
     retention_label = _owner_panel.picker_label("retention", _retention_value(ctx, retention), ctx.language_code)
     buttons = [
@@ -288,6 +293,9 @@ def _main_view(ctx: _owner_panel.PanelContext, manager: bool, notice: str | None
         _toggle(ctx, "dossiers", current["dossiers"], "d.ask"),
         _toggle(ctx, "alerts", current["alerts"]),
     ]
+    usage_row = _usage.panel_row(ctx.language_code, ctx.chat_id, SECTION_KEY)
+    if usage_row:  # none while the gateway's environment decides
+        buttons.append(usage_row)
     return _owner_panel.PanelView(text="\n".join(lines), buttons=buttons)
 
 
@@ -338,6 +346,8 @@ def render(ctx: _owner_panel.PanelContext) -> _owner_panel.PanelView:
         if _settings.enabled("history"):
             return _confirm_view(ctx)
         notice = _tr("settings.needs_history", ctx)
+    elif arg in _usage.PANEL_ARGS:
+        notice = _usage.panel_apply(arg, ctx.language_code)
     elif arg is not None and (target := _retention_target(arg)) is not None:
         days, confirmed = target
         # Judged against the value in effect now, so a stale button for a shorter value asks again.
@@ -355,4 +365,5 @@ def register_section(voice_cleanup: Callable[[], tuple[str, str] | None] | None 
     if voice_cleanup is not None:
         _voice_cleanup = voice_cleanup
     _owner_panel.register_strings(STRINGS)
+    _usage.register_strings()
     _owner_panel.register_section(SECTION_KEY, SECTION_LABEL, render, order=ORDER)

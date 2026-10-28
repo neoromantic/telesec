@@ -531,7 +531,7 @@ Like the panel, the command is read-only, uses no LLM, and stores nothing. The g
 
 - The report never prints message text, in text or JSON. To measure text length it reads the text of each message, keeps only the number of characters, and drops the text.
 - Contact names are untrusted. Text output escapes control characters and bidirectional marks in them.
-- No LLM and no network calls. The report is computed live, and nothing new is stored.
+- No LLM calls. The report is computed live and makes no network calls. With [usage stats](../README.md#usage-stats) on, the command name `stats` is counted at most once a day; nothing about the report is sent or stored.
 - The command is read-only. It does not rebuild the contact catalog, repair files, or classify pending deletions. A pending deletion stays pending until the gateway or `history maintain` classifies it.
 - Like the other history read commands, it fails closed. A stale or damaged catalog, a torn final line, or a missing lock is an error: the command prints `error: ...`, exits 1, and prints no partial report. Catalog and tail errors name the command that fixes them.
 
