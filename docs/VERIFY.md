@@ -16,6 +16,17 @@ Native-handler checks must demonstrate that every Business message/edit/deletion
 
 Release check: deploy the tag to the maintainer's running Hermes gateway, restart it, check that the plugin's handlers are wired and the error log has no plugin lines, then run the [controlled live smoke](#controlled-live-smoke). A clean isolated `hermes plugins validate --install-deps` runs only when asked; the plugin may import only the standard library, PTB, and Hermes core dependencies, so a long-running gateway with extra packages cannot hide a missing one.
 
+## 0.17.0 release and live smoke: 2026-10-29
+
+The maintainer's running gateway got a plugin-only update to `v0.17.0` (`74d2d97ad4023aefcd49b287cd9778659111ddf0`) and restarted. A clean isolated `hermes plugins validate` was not run. Before the release, 2299 tests passed locally (1 skipped), and CI passed on Python 3.11–3.14.
+
+- **Startup.** The gateway wired the plugin's native Telegram handlers, and the error log had no Telesec lines after the restart.
+- **Settings.** `/telesec` in the owner's private chat with the bot showed the compact switches, `Usage stats: on`, and the Share / Don't share row. The usage stats notice came once, with **Turn off usage stats**.
+- **Raw first, then cleanup.** A synthetic English voice note from the owner in a controlled Business chat got the raw transcript in its caption about 0.7–1.1 s after it arrived. Cleanup edited the same caption in place about 4.2–4.7 s later (`cleanup=edited`, `caption_outcome=attached`); no second transcript was posted. The owner's caption edit in the third run came after cleanup had finished, so the cancellation of cleanup on a manual edit was not exercised live; the offline suite covers it.
+- **History.** The voice notes were captured, and `hermes telesec history verify` reported `ok=True` with no errors or warnings.
+- **Not exercised live.** Deletion alerts need the contact to delete a message, so they were not checked live; the offline suite covers delivery and restart replay.
+- **Cleanup.** The chat's transcription mode was set back to `off`, and the test voice notes and panel messages were deleted.
+
 ## 0.17.0 before release: 2026-10-28
 
 Not yet deployed; no live smoke yet. The offline suite covers the three changes with simulated Telegram calls:
