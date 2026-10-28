@@ -815,10 +815,10 @@ def test_register_adds_the_dossier_section(dossier_plugin):
     assert owner_panel.get_section("dossier") is None
     dossier_plugin.register(FakeCtx(None))
     section = owner_panel.get_section("dossier")
-    assert (section.key, section.label) == ("dossier", "Dossier")
+    assert (section.key, section.label) == ("dossier", "📖 Open dossier")
     view = owner_panel.render_main(owner_panel.PanelContext("1000", str(CHAT), None, BUSINESS_ID), None,
                                    owner_panel.sections(), True)
-    assert ("Dossier", f"tb:s:{CHAT}:dossier") in [button for row in view.buttons for button in row]
+    assert ("📖 Open dossier", f"tb:s:{CHAT}:dossier") in [button for row in view.buttons for button in row]
 
 
 @pytest.mark.asyncio
@@ -830,7 +830,7 @@ async def test_panel_section_sends_a_rich_localized_dossier_with_panel_callbacks
 
     await open_section(plug, bot, f"tb:s:{CHAT}:dossier", lang="ru")
 
-    assert bot.answers == [{"callback_query_id": "query-1", "text": "Досье"}]
+    assert bot.answers == [{"callback_query_id": "query-1", "text": "📖 Открыть досье"}]
     assert bot.edits == [] and bot.sent == []
     ((endpoint, kwargs),) = bot.api
     assert endpoint == "editmessagetext"
@@ -927,7 +927,7 @@ async def test_panel_back_returns_to_a_plain_main_view(plug, ds, panel):
     assert bot.api == []
     (edit,) = bot.edits
     assert edit["text"].startswith("Owner panel:")
-    assert ("Dossier", f"tb:s:{CHAT}:dossier") in [button for row in keyboard_of(edit["reply_markup"]) for button in row]
+    assert ("📖 Open dossier", f"tb:s:{CHAT}:dossier") in [button for row in keyboard_of(edit["reply_markup"]) for button in row]
 
 
 # ---------------------------------------------------------------------------

@@ -91,6 +91,10 @@ _OWNER_CACHE: dict[str, str] = {}
 _CACHE_LOCK = threading.RLock()
 _CHAT_STATE_CACHE: dict[str, ChatStateCacheEntry] = {}
 _DELETION_TIMERS: dict[tuple[str, str], DeletionTimerEntry] = {}
+# Called with each new deletion classification and the deleted message as history saved it (None when it
+# was not saved). It runs under the chat's writer lock, so it must only hand the work off. The gateway sets
+# it for deletion alerts.
+_DELETION_LISTENER: Callable[[dict[str, Any], MessageState | None], None] | None = None
 _LAST_MAINTENANCE_AT: datetime | None = None
 # The owner's `/dossier` commands and the dossiers the bot posted: kept out of history, so their
 # deletion is control traffic too. Insertion-ordered, bounded, per process.
@@ -2183,8 +2187,35 @@ def _sync_pending_deletions_for_chat(
             continue
         if _append_record_to_state(chat_dir, state, record, appended_records=appended_records):
             appended += 1
+            _notify_deletion_listener(record, pending.original)
         _cancel_deletion_timer(chat_dir, deleted_event_id)
     return appended
+
+
+def set_deletion_listener(listener: Callable[[dict[str, Any], MessageState | None], None] | None) -> None:
+    global _DELETION_LISTENER
+    _DELETION_LISTENER = listener
+
+
+def _notify_deletion_listener(record: dict[str, Any], original: MessageState | None) -> None:
+    listener = _DELETION_LISTENER
+    if listener is None:
+        return
+    try:
+        listener(record, original)
+    except Exception as exc:  # noqa: BLE001 - an alert must never break history capture
+        logger.warning("%s: deletion listener failed (%s)", PLUGIN_NAME, type(exc).__name__)
+
+
+def deleted_message_text(business_connection_id: Any, chat_id: Any, message_id: Any) -> str | None:
+    """The saved text of a deleted message, None when history no longer has it. Blocking."""
+    chat_dir = _history_chat_dir_path(business_connection_id, chat_id)
+    if not chat_dir.exists():
+        return None
+    with _chat_read_lock(chat_dir):
+        state, _ = _load_chat_state(chat_dir, repair_tails=False)
+    message = state.messages.get(str(message_id))
+    return message.text if message is not None and message.deleted else None
 
 
 def _classify_due_for_chat(

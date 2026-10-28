@@ -788,7 +788,7 @@ def _mode_json(
         effective, source = entry.mode, "stored"
     else:
         effective, source = DEFAULT_MODE, "default"
-    history, dossier = scope.state(owner, chat)
+    history, dossier, _alerts = scope.state(owner, chat)
     return {
         "owner": owner,
         "chat_id": chat,

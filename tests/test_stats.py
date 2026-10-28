@@ -801,6 +801,20 @@ def test_message_counted_once(plugin):
     assert contact["sessions"]["total"] == 1
 
 
+def test_telesec_cleaning_its_own_transcript_reply_is_no_sent_edit(plugin, cs):
+    at = _utc(2026, 10, 10, 9, 0)
+    later = at + timedelta(seconds=40)
+    transcript, transcript_edit = _msg(plugin, 1, at, "outbound"), _msg(plugin, 1, at, "outbound", edited=True,
+                                                                         observed=later)
+    transcript["text"], transcript_edit["text"] = "🎙️ raw words", "🎙️ Clean words."
+    own_edit = _msg(plugin, 2, at, "outbound", edited=True, observed=later)
+
+    stats = cs.compute_stats(_entry(), [transcript, transcript_edit, _msg(plugin, 2, at, "outbound"), own_edit],
+                             _window(cs))
+
+    assert (stats.edited.total, stats.edited.sent) == (1, 1)
+
+
 def test_latest_known_direction_wins(plugin, cs):
     at = _utc(2026, 10, 10, 9, 0)
     later = at + timedelta(minutes=5)

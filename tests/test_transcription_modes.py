@@ -1093,10 +1093,11 @@ async def test_corrupt_file_keeps_last_valid_modes_and_only_the_cli_repairs_it(p
         await _panel_tap(plugin, data, panel_bot)
     error = "Error: could not save transcription mode"
     assert [call["text"] for call in panel_bot.text_edit_calls] == [
-        f"Owner panel: chat 991\n{error}\nTranscription: off\nHistory: off in Settings",
-        f"Owner panel: chat 991\n{error}\nTranscription: off\nHistory: off in Settings",
-        "Owner panel: chat 991\nTranscription: off\nHistory: off in Settings",
+        f"Owner panel: chat 991\n{error}\nHistory: off in Settings",
+        f"Owner panel: chat 991\n{error}\nHistory: off in Settings",
+        "Owner panel: chat 991\nHistory: off in Settings",
     ]
+    assert panel_bot.text_edit_calls[-1]["reply_markup"].inline_keyboard[0][0].text == "🎙️ Transcription: off ›"
     assert path.read_bytes() == b"{not json SECRET-CONTENT"
     assert list(path.parent.glob("transcription-modes.json.corrupt-*")) == []
     assert store.get(OWNER, CHAT).mode == "off"

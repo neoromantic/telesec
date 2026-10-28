@@ -30,7 +30,7 @@ The product connects readable Telegram voice messages with useful personal corre
 ## Implemented in 0.12.0
 
 - Settings in the private chat with the bot: `/telesec` or the ⚙️ Settings button turns transcription, history, and dossiers on or off for all chats, and `hermes telesec settings` does the same from the terminal. The old environment variables and the Desktop `history_enable` setting are moved into Settings once. [Settings](../README.md#settings).
-- Per-chat history and dossier controls: each chat's owner panel has **Save history** / **Don't save** and **Keep dossier** / **No dossier** rows in the style of transcription modes, and `hermes telesec chat` does the same from the terminal. Off pauses the chat and keeps what was saved. [Per-chat history and dossier](../README.md#per-chat-history-and-dossier).
+- Per-chat history and dossier controls: each chat's owner panel has **Save history** / **Don't save** and **Keep dossier** / **No dossier** rows in the style of transcription modes (one switch each since 0.17.0), and `hermes telesec chat` does the same from the terminal. Off pauses the chat and keeps what was saved. [Per-chat history and dossier](../README.md#per-chat-history-and-dossier).
 
 ## Implemented in 0.12.2
 
@@ -56,6 +56,12 @@ The product connects readable Telegram voice messages with useful personal corre
 ## Implemented in 0.16.0
 
 - `/dossier` posts the contact's dossier again ([#17](https://github.com/neoromantic/telesec/issues/17)): the stored document without the owner note, refreshed once first when it is behind the chat or the note changed. The separate summary is gone. [`/dossier` in a chat](DOSSIERS.md#dossier-in-a-chat).
+
+## Implemented in 0.17.0
+
+- Raw-first transcripts ([#8](https://github.com/neoromantic/telesec/issues/8)): the raw STT text shows at once, and cleanup edits the same caption or reply in place. A raw transcript longer than one message is still cleaned first.
+- Deletion alerts ([#27](https://github.com/neoromantic/telesec/issues/27), first slice): an alert in the owner's private chat with the bot for a contact's deletion that no later message explains, with the text on a tap; on by default, switched in Settings and per chat. Overdue-reply alerts stay a later slice of #27. [Deletion alerts](../README.md#deletion-alerts).
+- Compact switches ([#104](https://github.com/neoromantic/telesec/issues/104)): one emoji button per feature in Settings and the owner panel, with a picker for transcription mode and history retention.
 
 ## Next
 
@@ -83,10 +89,10 @@ Deferred from #17: using dossiers in drafts (#18) and automatic replies (#19), o
 
 | Issue | First useful slice |
 |---|---|
-| [Raw-first transcripts #8](https://github.com/neoromantic/telesec/issues/8) | Show raw STT immediately, then edit the same caption/reply after cleanup; start with one output target. |
+| [Raw-first transcripts #8](https://github.com/neoromantic/telesec/issues/8) | Implemented in 0.17.0 for transcripts that fit one caption or reply. Remaining: raw-first for transcripts longer than one message. |
 | [Transcription controls #7](https://github.com/neoromantic/telesec/issues/7) | Implemented in 0.9.0: manual per-chat `both`, `own`, `peer`, and `off`. Automatic peer detection remains a separate investigation. |
 | [Scheduled sending #3](https://github.com/neoromantic/telesec/issues/3) | Recover the existing static-text send CLI; Hermes cron owns timing, with explicit targets and no ledger. |
-| [Correspondence insights #4](https://github.com/neoromantic/telesec/issues/4) | First slice in 0.9.0: the deterministic [`stats` command](STATS.md) with per-contact counts, active days, sessions, latest activity, and deletions. The same one-chat report is in the [owner panel](STATS.md#in-telegram-owner-panel) since 0.10.0. Response-time and turn metrics [#28](https://github.com/neoromantic/telesec/issues/28) and the in-chat `/stats` card shipped in 0.12.2; 0.13.0 redraws the panel view and the card as rich messages. Remaining: opt-in owner notifications [#27](https://github.com/neoromantic/telesec/issues/27), an all-contacts overview in the panel [#29](https://github.com/neoromantic/telesec/issues/29), and voice notes in stats (after the metadata capture change above). |
+| [Correspondence insights #4](https://github.com/neoromantic/telesec/issues/4) | First slice in 0.9.0: the deterministic [`stats` command](STATS.md) with per-contact counts, active days, sessions, latest activity, and deletions. The same one-chat report is in the [owner panel](STATS.md#in-telegram-owner-panel) since 0.10.0. Response-time and turn metrics [#28](https://github.com/neoromantic/telesec/issues/28) and the in-chat `/stats` card shipped in 0.12.2; 0.13.0 redraws the panel view and the card as rich messages. Deletion alerts ([#27](https://github.com/neoromantic/telesec/issues/27)) shipped in 0.17.0. Remaining: overdue-reply alerts (#27), an all-contacts overview in the panel [#29](https://github.com/neoromantic/telesec/issues/29), and voice notes in stats (after the metadata capture change above). |
 | [Voice bursts #9](https://github.com/neoromantic/telesec/issues/9) | Opt-in same-sender grouping with ordering and explicit boundaries; avoid delaying every single note. |
 | [Release and launch #10](https://github.com/neoromantic/telesec/issues/10) | Align versions, verify installation, refresh visual docs, and publish accurate release/demo material. |
 

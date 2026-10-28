@@ -78,6 +78,7 @@ else:
 
 
 from . import chat_settings as _chat_settings
+from . import deletion_alerts as _deletion_alerts
 from . import dossier_panel as _dossier_panel
 from . import dossier_support as _dossier_support
 from . import global_settings as _global_settings
@@ -430,6 +431,12 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
             # ordinary update for the same message already reaches Hermes.
             raise ApplicationHandlerStop
         try:
+            _deletion_alerts.bind(context.bot)
+            _deletion_alerts.note_language(_get(getattr(update, "effective_message", None), "from_user"))
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not break dispatch
+            logger.debug("%s: deletion alert binding failed (%s)", _PLUGIN_NAME, type(exc).__name__)
+        try:
+            _note_transcript_target_edit(update)
             _note_business_update_chat(update)
         except Exception as exc:  # noqa: BLE001 - bookkeeping must not break dispatch
             logger.debug("%s: business chat note failed (%s)", _PLUGIN_NAME, type(exc).__name__)
@@ -492,6 +499,7 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
         # the panel and its `tb:` buttons never reach the ordinary Hermes path.
         claimed = _is_owner_panel_callback(update)
         try:
+            _deletion_alerts.note_language(getattr(update, "effective_user", None))
             claimed = await _handle_owner_panel_update(update, bot=context.bot)
         except Exception as exc:  # noqa: BLE001 - panel failures must not break dispatch
             logger.warning("%s: owner panel handling failed (%s)", _PLUGIN_NAME, type(exc).__name__)
@@ -516,6 +524,7 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
         def check_update(self, update: Any) -> bool:
             return getattr(update, "business_connection", None) is not None
 
+    _history_support.set_deletion_listener(_deletion_alerts.on_classified)
     app.add_handler(BusinessHandler(on_business_update, block=True), group=_RAW_HISTORY_HANDLER_GROUP)
     app.add_handler(OwnerPanelHandler(on_owner_panel_update, block=True), group=_RAW_HISTORY_HANDLER_GROUP)
     app.add_handler(
@@ -1677,7 +1686,8 @@ async def _send_transcript_messages(
     message: Any,
     texts: Iterable[str],
     collapsible: bool = True,
-) -> None:
+) -> list[Any]:
+    """Send the transcript as a reply to ``message``; returns what each send returned."""
     chat_id = getattr(getattr(message, "chat", None), "id", None)
     business_connection_id = _business_connection_id(message)
     reply_to_message_id = getattr(message, "message_id", None)
@@ -1685,6 +1695,7 @@ async def _send_transcript_messages(
         raise ValueError("missing chat_id or business_connection_id")
 
     first = True
+    sent: list[Any] = []
     notify_kwargs = _notification_kwargs(adapter)
     for text in texts:
         kwargs = {
@@ -1698,14 +1709,15 @@ async def _send_transcript_messages(
         if first and reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
         try:
-            await bot.send_message(**kwargs)
+            sent.append(await bot.send_message(**kwargs))
         except Exception as exc:
             if not collapsible or not _expandable_entity_unsupported(exc):
                 raise
             logger.info("%s: expandable transcript unavailable; using plain text: %s", _PLUGIN_NAME, exc)
             fallback_kwargs = {key: value for key, value in kwargs.items() if key != "entities"}
-            await bot.send_message(**fallback_kwargs)
+            sent.append(await bot.send_message(**fallback_kwargs))
         first = False
+    return sent
 
 
 async def _send_error_if_enabled(*, bot: Any, adapter: Any, message: Any, error: str) -> None:
@@ -1734,6 +1746,76 @@ def _resolve_transcriber(
     return transcribe_audio
 
 
+# A raw transcript waiting for its cleanup, by (connection, chat, message id) of the caption or reply that
+# shows it -> the texts Telesec set there. Any other edit is the owner's own: it empties the set, and the
+# cleanup then leaves the message alone. In memory only: after a restart the raw text simply stays.
+_PENDING_TRANSCRIPTS: dict[tuple[str, str, str], set[str]] = {}
+
+
+def _transcript_target_key(message: Any, message_id: Any) -> tuple[str, str, str]:
+    return (str(_business_connection_id(message)), str(_get(_get(message, "chat"), "id")), str(message_id))
+
+
+def _note_transcript_target_edit(update: Any) -> None:
+    """An edit of a raw transcript's caption or reply that Telesec did not make cancels its cleanup."""
+    payload = getattr(update, "edited_business_message", None)
+    if payload is None:
+        return
+    expected = _PENDING_TRANSCRIPTS.get(_transcript_target_key(payload, _get(payload, "message_id")))
+    if expected and str(_get(payload, "caption") or _get(payload, "text") or "").strip() not in expected:
+        expected.clear()
+
+
+def _timing_mark(timings: dict[str, Any] | None, name: str, value: Any = None) -> None:
+    if timings is not None:
+        timings[name] = time.monotonic() if value is None else value
+
+
+def _timing_fields(timings: dict[str, Any]) -> str:
+    """Milliseconds from the start to STT, first visible text, and the end of cleanup; -1 when unknown."""
+    start = timings.get("start")
+
+    def ms(name: str) -> int:
+        at = timings.get(name)
+        return -1 if start is None or at is None else int((at - start) * 1000)
+
+    return (f"stt_ms={ms('stt')} first_visible_ms={ms('first_visible')} cleanup_ms={ms('cleanup_done')} "
+            f"cleanup={timings.get('cleanup', '-')}")
+
+
+async def _edit_transcript_in_place(*, bot: Any, message: Any, surface: str, target_id: Any, cleaned: str) -> str:
+    """Replace the raw transcript with the cleaned one in the same caption or reply; returns the outcome."""
+    common = {
+        "chat_id": _get(_get(message, "chat"), "id"),
+        "message_id": target_id,
+        "business_connection_id": _business_connection_id(message),
+    }
+    if surface == "caption":
+        caption, entities = _build_transcript_caption_payload(message, cleaned) or ("", ())
+        edit = bot.edit_message_caption
+        attempts = ({**common, "caption": caption, "caption_entities": entities},
+                    {**common, "caption": caption, "caption_entities": tuple(_get(message, "caption_entities") or ())})
+    else:
+        text = _format_transcript_messages(cleaned)[0]
+        edit = bot.edit_message_text
+        attempts = ({**common, "text": text, "entities": (_expandable_blockquote_entity(text),)},
+                    {**common, "text": text})
+    for index, kwargs in enumerate(attempts):
+        try:
+            result = await edit(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - a failed edit leaves the raw text, never a second transcript
+            outcome = _classify_caption_edit_exception(exc)
+            if outcome is CaptionEditAttemptOutcome.APPLIED:
+                return "edited"
+            if outcome is CaptionEditAttemptOutcome.UNSUPPORTED_ENTITY and index == 0:
+                continue
+            logger.info("%s: cleaned transcript edit failed; the raw text stays (%s)", _PLUGIN_NAME,
+                        type(exc).__name__)
+            return "edit_failed"
+        return "edited" if result is not False else "edit_failed"
+    return "edit_failed"
+
+
 async def _publish_transcript(
     *,
     bot: Any,
@@ -1742,17 +1824,69 @@ async def _publish_transcript(
     transcript: str,
     cleanup_fn: Callable[..., Any] | None,
     llm: Any,
+    timings: dict[str, Any] | None = None,
 ) -> tuple[str, TranscriptCaptionOutcome]:
-    final_text = await _cleanup_transcript(transcript, llm=llm, cleanup_fn=cleanup_fn)
-    caption_outcome = await _try_attach_transcript_caption(bot=bot, message=message, transcript=final_text)
+    """Post the raw transcript at once, then edit the same caption or reply when cleanup changes it.
+
+    Returns the text visible at the end and the caption outcome. A raw transcript longer than one message
+    is cleaned first and then posted, as before. Cleanup that fails, returns the same text, or no longer
+    fits the caption or reply leaves the raw text; so does an owner's edit of it while cleanup runs.
+    """
+    raw = (transcript or "").strip()
+    cleanup_runs = _should_cleanup(raw) and (llm is not None or cleanup_fn is not None)
+    if not cleanup_runs or len(_format_transcript_messages(raw)) != 1:
+        final_text = await _cleanup_transcript(raw, llm=llm, cleanup_fn=cleanup_fn)
+        _timing_mark(timings, "cleanup", "cleanup_first" if cleanup_runs else "not_needed")
+        _timing_mark(timings, "cleanup_done")
+        caption_outcome = await _try_attach_transcript_caption(bot=bot, message=message, transcript=final_text)
+        if caption_outcome is TranscriptCaptionOutcome.REPLY_FALLBACK:
+            await _send_transcript_messages(
+                bot=bot,
+                adapter=adapter,
+                message=message,
+                texts=_format_transcript_messages(final_text),
+            )
+        _timing_mark(timings, "first_visible")
+        return final_text, caption_outcome
+
+    caption_outcome = await _try_attach_transcript_caption(bot=bot, message=message, transcript=raw)
     if caption_outcome is TranscriptCaptionOutcome.REPLY_FALLBACK:
-        await _send_transcript_messages(
-            bot=bot,
-            adapter=adapter,
-            message=message,
-            texts=_format_transcript_messages(final_text),
+        sent = await _send_transcript_messages(
+            bot=bot, adapter=adapter, message=message, texts=_format_transcript_messages(raw)
         )
-    return final_text, caption_outcome
+        surface, target_id = "reply", _get(sent[0] if sent else None, "message_id")
+        visible = _format_transcript_messages(raw)[0]
+    else:
+        surface, target_id = "caption", _get(message, "message_id")
+        visible = _build_transcript_caption(message, raw) or ""
+    _timing_mark(timings, "first_visible")
+    if target_id is None:
+        _timing_mark(timings, "cleanup", "no_target")
+        return raw, caption_outcome
+
+    key = _transcript_target_key(message, target_id)
+    _PENDING_TRANSCRIPTS[key] = {visible.strip()}
+    try:
+        cleaned = (await _cleanup_transcript(raw, llm=llm, cleanup_fn=cleanup_fn)).strip()
+        _timing_mark(timings, "cleanup_done")
+        if cleaned == raw:
+            outcome = "unchanged"
+        elif not _PENDING_TRANSCRIPTS.get(key):
+            outcome = "owner_edited"
+        elif (_build_transcript_caption(message, cleaned) is None if surface == "caption"
+              else len(_format_transcript_messages(cleaned)) != 1):
+            outcome = "too_long"
+        else:
+            new_visible = (_build_transcript_caption(message, cleaned) if surface == "caption"
+                           else _format_transcript_messages(cleaned)[0])
+            _PENDING_TRANSCRIPTS[key].add(str(new_visible).strip())
+            outcome = await _edit_transcript_in_place(
+                bot=bot, message=message, surface=surface, target_id=target_id, cleaned=cleaned
+            )
+        _timing_mark(timings, "cleanup", outcome)
+        return (cleaned if outcome == "edited" else raw), caption_outcome
+    finally:
+        _PENDING_TRANSCRIPTS.pop(key, None)
 
 
 async def _process_business_audio_file(
@@ -1793,6 +1927,7 @@ async def _process_business_audio_file(
         logger.info("%s: rejected business %s due to duration metadata", _PLUGIN_NAME, media_label)
         return
 
+    timings: dict[str, Any] = {"start": time.monotonic()}
     path = _cache_path_for(message)
     probe_path = path.with_name(f"{path.stem}.probe.wav")
     normalized_path = path.with_name(f"{path.stem}.full.wav")
@@ -1830,6 +1965,7 @@ async def _process_business_audio_file(
             transcript = str(full_result.get("transcript") or "").strip()
             if not transcript:
                 return
+        _timing_mark(timings, "stt")
 
         final_text, caption_outcome = await _publish_transcript(
             bot=bot,
@@ -1838,9 +1974,11 @@ async def _process_business_audio_file(
             transcript=transcript,
             cleanup_fn=cleanup_fn,
             llm=llm,
+            timings=timings,
         )
         logger.info(
-            "%s: transcribed business %s chat=%s message=%s raw_chars=%d final_chars=%d cleaned=%s caption_outcome=%s",
+            "%s: transcribed business %s chat=%s message=%s raw_chars=%d final_chars=%d cleaned=%s caption_outcome=%s "
+            "%s",
             _PLUGIN_NAME,
             media_label,
             _safe_part(_get(_get(message, "chat"), "id", "")),
@@ -1849,6 +1987,7 @@ async def _process_business_audio_file(
             len(final_text),
             final_text != transcript,
             caption_outcome.value,
+            _timing_fields(timings),
         )
     except Exception as exc:
         logger.warning("%s: business attached-audio handling failed: %s", _PLUGIN_NAME, exc, exc_info=True)
@@ -1897,11 +2036,13 @@ async def _process_business_voice_event(
             llm=llm,
         )
         return
+    timings: dict[str, Any] = {"start": time.monotonic()}
     path = _cache_path_for(message)
     try:
         await _download_voice(message, path)
         transcriber = _resolve_transcriber(transcribe_fn)
         result = await asyncio.to_thread(transcriber, str(path))
+        _timing_mark(timings, "stt")
         if not isinstance(result, dict) or not result.get("success"):
             error = result.get("error", "unknown STT error") if isinstance(result, dict) else "invalid STT result"
             logger.warning("%s: transcription failed for %s: %s", _PLUGIN_NAME, path, error)
@@ -1920,9 +2061,11 @@ async def _process_business_voice_event(
             transcript=transcript,
             cleanup_fn=cleanup_fn,
             llm=llm,
+            timings=timings,
         )
         logger.info(
-            "%s: transcribed business %s chat=%s message=%s raw_chars=%d final_chars=%d cleaned=%s caption_outcome=%s",
+            "%s: transcribed business %s chat=%s message=%s raw_chars=%d final_chars=%d cleaned=%s caption_outcome=%s "
+            "%s",
             _PLUGIN_NAME,
             media_label,
             _safe_part(getattr(getattr(message, "chat", None), "id", "")),
@@ -1931,6 +2074,7 @@ async def _process_business_voice_event(
             len(final_text),
             final_text != transcript,
             caption_outcome.value,
+            _timing_fields(timings),
         )
     except Exception as exc:
         logger.warning("%s: business voice handling failed: %s", _PLUGIN_NAME, exc, exc_info=True)
@@ -2143,13 +2287,13 @@ class _PanelState:
     ctx: _owner_panel.PanelContext
     entry: Any
     store_label: str | None
-    features: tuple[str, str] = _owner_panel.CHAT_DEFAULT_FEATURES  # (history, dossier), see chat_state
+    features: tuple[str, str, str] = _owner_panel.CHAT_DEFAULT_FEATURES  # (history, dossier, alerts), see chat_state
     history_connections: tuple[str, ...] = ()  # the owner's connections with saved history for this chat
 
     @property
     def erasable(self) -> bool:
-        """The panel offers "Erase saved history": the chat has saved history and does not record now (Don't
-        save, the old scope rule, or history off in Settings)."""
+        """The panel offers "Erase saved history": the chat has saved history and does not record now (history
+        off for the chat, the old scope rule, or history off in Settings)."""
         return self.features[0] in _ERASABLE_HISTORY and bool(self.history_connections)
 
 
@@ -2288,10 +2432,11 @@ def _panel_state(
     store_label = _transcription_modes.build_chat_label(profile) if isinstance(profile, dict) else None
     label = (entry.label if entry is not None else None) or store_label
     try:
-        features = _chat_settings.chat_state(owner_id, chat_id, chat_type=chat_type, connections=captured)
+        history, dossier = _chat_settings.chat_state(owner_id, chat_id, chat_type=chat_type, connections=captured)
+        features = (history, dossier, _chat_settings.alerts_state(owner_id, chat_id, history=history))
     except Exception as exc:  # noqa: BLE001 - hide the rows rather than show a wrong state
         logger.warning("%s: chat settings state failed (%s)", _PLUGIN_NAME, type(exc).__name__)
-        features = ("unreadable", "no_history")
+        features = ("unreadable", "no_history", "no_history")
     # Only the owner's verified connections: another owner's history of the same chat id is never offered.
     history_connections = tuple(c for c in owner.connections if _history_support.has_saved_history(c, chat_id))
     ctx = _owner_panel.PanelContext(
@@ -2513,7 +2658,7 @@ async def _apply_panel_mode(action: _owner_panel.PanelCallback, state: _PanelSta
 
 
 async def _apply_panel_flag(action: _owner_panel.PanelCallback, state: _PanelState) -> tuple[str, bool]:
-    """Turn this chat's history or dossier on or off; returns (toast, save failed).
+    """Turn this chat's history, dossier or deletion alerts on or off; returns (toast, save failed).
 
     A tap on a hidden row (a stale button) writes nothing and its toast is the row's status. A corrupt
     chat-settings.json is never overwritten from Telegram.
@@ -2538,7 +2683,7 @@ async def _apply_panel_flag(action: _owner_panel.PanelCallback, state: _PanelSta
     if connection:
         # Capture then finds this chat's owner without an API call (best effort, as for modes).
         await _bind_business_connection(_transcription_modes.default_store(), connection, ctx.owner_user_id)
-        if not on:
+        if not on and feature != "alerts":
             await asyncio.to_thread(_dossier_panel.stop_refresh, connection, ctx.chat_id)
     return _owner_panel.tr(f"{feature}.done.{value}", ctx.language_code), False
 
@@ -2646,6 +2791,9 @@ async def _handle_owner_panel_callback(query: Any, *, bot: Any) -> None:
         await _handle_settings_home_callback(query, parsed, owner, str(sender_id), language_code, bot=bot)
         return
     chat_id = str(parsed.chat_id)
+    if parsed.action == "x":
+        await _show_deleted_text(query, owner, chat_id, str(parsed.arg), language_code, bot=bot)
+        return
     state = await asyncio.to_thread(_panel_state, owner, str(sender_id), chat_id, catalog, parsed.sub, language_code)
     entry = state.entry
     enabled = _voice_module_enabled()
@@ -2664,6 +2812,12 @@ async def _handle_owner_panel_callback(query: Any, *, bot: Any) -> None:
                 logger.warning("%s: could not save transcription mode (%s)", _PLUGIN_NAME, type(exc).__name__)
                 toast = notice = _owner_panel.tr("save_error", language_code)
         await _answer_panel_callback(bot, query, toast)
+    elif parsed.action == "t":
+        # The mode picker; while transcription is off in Settings, the main view with that toast.
+        await _answer_panel_callback(bot, query, None if enabled else _owner_panel.tr("transcription_disabled",
+                                                                                      language_code))
+        if enabled:
+            view = _owner_panel.render_mode_picker(state.ctx, entry)
     elif parsed.action == "f" and parsed.arg in _owner_panel.ERASE_ARGS:
         view, toast, notice = await _panel_erase(parsed, state)
         await _answer_panel_callback(bot, query, toast)
@@ -2698,6 +2852,37 @@ async def _handle_owner_panel_callback(query: Any, *, bot: Any) -> None:
     action_name = f"{parsed.action}:{parsed.arg}" if parsed.action in ("s", "f") else parsed.action
     _log_panel(action_name, chat_id, entry.mode if entry is not None else None)
     await _edit_panel_message(bot, query, view, fallback)
+
+
+async def _show_deleted_text(
+    query: Any, owner: _PanelOwner, chat_id: str, message_id: str, language_code: Any, *, bot: Any
+) -> None:
+    """"Show text" on a deletion alert: add the deleted message's saved text to the alert, quoted."""
+    text = await asyncio.to_thread(_deletion_alerts.saved_text, owner.connections, chat_id, message_id)
+    if text is None:
+        await _answer_panel_callback(bot, query, _owner_panel.tr("alert.gone", language_code))
+        return
+    await _answer_panel_callback(bot, query, None)
+    message = _get(query, "message")
+    alert = str(_get(message, "text") or "")
+    prefix = f"{alert}\n\n"
+    quoted = _owner_panel.clip_text(prefix + text)[len(prefix):]
+    # The panel link stays; "Show text" goes.
+    rows = [[button for button in row if not str(_get(button, "callback_data") or "").startswith("tb:x:")]
+            for row in (_get(_get(message, "reply_markup"), "inline_keyboard") or ())]
+    rows = [row for row in rows if row]
+    try:
+        from telegram import InlineKeyboardMarkup
+
+        await bot.edit_message_text(
+            chat_id=_get(_get(message, "chat"), "id"), message_id=_get(message, "message_id"), text=prefix + quoted,
+            entities=(_expandable_blockquote_entity(quoted, offset=_telegram_text_length(prefix)),),
+            reply_markup=InlineKeyboardMarkup(rows) if rows else None,
+        )
+    except Exception as exc:  # noqa: BLE001 - e.g. a second tap: "message is not modified"
+        if "not modified" not in str(exc).casefold():
+            logger.warning("%s: deletion alert edit failed (%s)", _PLUGIN_NAME, type(exc).__name__)
+    _log_panel("x", chat_id)
 
 
 async def _handle_settings_home_callback(
@@ -3246,9 +3431,9 @@ terminal tool on this gateway host and prefer `--format json`.
 `hermes telesec mode get <chat_id or @username> --format json`. `effective_mode` is what the \
 next voice note gets; `source` is stored, default, or disabled. Change a mode only when the user asks: \
 `hermes telesec mode set <chat> <mode>` or `hermes telesec mode reset <chat>`.
-- History and dossier per chat: `hermes telesec chat get <chat> --format json` (`effective_history`, \
-`effective_dossier`); change only when the user asks: `hermes telesec chat set <chat> --history on|off` \
-or `--dossier on|off`.
+- History, dossier and deletion alerts per chat: `hermes telesec chat get <chat> --format json` \
+(`effective_history`, `effective_dossier`, `effective_alerts`); change only when the user asks: \
+`hermes telesec chat set <chat> --history on|off`, `--dossier on|off` or `--alerts on|off`.
 - Correspondence stats: `hermes telesec stats --chat <chat_id> --format json` (or \
 `--contact @username`; without either it lists contacts).
 - History and dossiers, when enabled: skills `{_PLUGIN_NAME}:history` and `{_PLUGIN_NAME}:dossiers` \
@@ -3257,7 +3442,7 @@ the owner sends `/dossier`, which posts the dossier without the note.
 - Owner panel: a bot message that starts with "Owner panel:" or "Панель владельца:" controls one \
 Business chat and names it as `chat <id>`. When the user replies to a panel message, the question is \
 about that chat; use that id as <chat_id> above.
-- Switches for all chats (transcription, history, dossiers): `hermes telesec settings --format json`; \
+- Switches for all chats (transcription, history, dossiers, alerts): `hermes telesec settings --format json`; \
 change one only when the user asks: `hermes telesec settings set <feature> on|off`. A bot message that \
 starts with "Telesec settings" or "Настройки Telesec" is about all chats, not one chat.
 """
@@ -3342,6 +3527,7 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
     _stats_panel.register_section()
     _settings_panel.register_section(voice_cleanup=_voice_cleanup_model)
+    _deletion_alerts.register_strings()
     register_command = getattr(ctx, "register_command", None)
     if callable(register_command):  # the owner's exact `/telesec` never gets here: the panel claims it
         register_command("telesec", _settings_command_fallback, description="Telesec settings")

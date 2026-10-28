@@ -218,11 +218,11 @@ async def test_import_refuses_when_history_is_not_saved(enabled_history, tmp_pat
 
     plugin._chat_settings.default_store().set_flag(OWNER, CHAT, "history", False, via="cli")
     code, output = _run_history_cli(plugin, "history", "import", str(path), "--chat", str(CHAT))
-    assert (code, output) == (1, "error: chat 991 is set to Don't save; turn Save history on for it first")
+    assert (code, output) == (1, "error: history is off for chat 991; turn it on first: 'hermes telesec chat set 991 --history on'")
 
     set_switch(plugin, "history", False)
     code, output = _run_history_cli(plugin, "history", "import", str(path), "--chat", str(CHAT), "--dry-run")
-    assert (code, output) == (1, "error: history is off in Settings; turn on Save history first")
+    assert (code, output) == (1, "error: history is off in Settings; turn it on first")
     assert snapshot_history_state(plugin) == before
 
 

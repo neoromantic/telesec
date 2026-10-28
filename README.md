@@ -17,30 +17,33 @@
 2. Requires a real Telegram Business connection and preserves its `business_connection_id`.
 3. Returns `action: skip` so the ordinary auth/agent path does not process the media.
 4. Downloads the media transiently and delegates speech recognition to Hermes's configured `transcribe_audio` backend. Attached files must have safe byte/duration metadata, are locally duration-checked when needed, and pass a short mono/16 kHz speech-presence probe before full transcription.
-5. Optionally asks the host-owned `ctx.llm` facade for conservative proofreading or opt-in enrichment with ASR correction, filler cleanup, paragraphing, lists, and long-note titles.
-6. Publishes the first structurally usable enriched candidate. Empty output or a catastrophic size change gets one feedback retry; raw STT is the last fallback when neither model result is usable.
-7. For a short outgoing Business message, appends the transcript to the original voice/video-note caption as an expandable blockquote, retrying the same caption as plain text when Telegram rejects the new entity type.
-8. Uses expandable Business-scoped replies for incoming, long, expired, or uneditable messages, with the equivalent plain-text retry.
+5. Posts the raw speech-to-text at once. For a short outgoing Business message, it appends the transcript to the original voice/video-note caption as an expandable blockquote, retrying the same caption as plain text when Telegram rejects the new entity type. Incoming, expired, or uneditable messages get an expandable Business-scoped reply, with the equivalent plain-text retry.
+6. Optionally asks the host-owned `ctx.llm` facade for conservative proofreading or opt-in enrichment with ASR correction, filler cleanup, paragraphing, lists, and long-note titles. Empty output or a catastrophic size change gets one feedback retry.
+7. When cleanup returns different text that still fits, edits the same caption or reply in place. Telesec never posts a second transcript. If cleanup fails, times out, returns the same text, or no longer fits, or you edit the transcript yourself meanwhile, the raw text stays.
+8. A raw transcript longer than one message is still cleaned first and then posted, in parts.
 
 Handled updates are identified from stable Telegram Business connection, chat, update/message, and relationship data, then suppressed in memory for 24 hours. A successful caption edit suppresses the separate transcript reply, so the chat never receives both forms. PTB `BadRequest` is treated as a definite Telegram-side rejection unless it is the recognized `message is not modified` or unsupported-entity case. Failed entity requests are not treated as delivered before their targeted plain-text retry, and ambiguous post-send transport/backend failures suppress the reply fallback unless remote state is verified. The voice pipeline never runs a separate model provider client and never needs its own credentials.
 
 ## Settings
 
-Three switches cover all chats: transcription (on by default), history (off by default), and dossiers (off by default). One more row sets how long history is kept (forever by default). Change them in your private chat with the bot: send `/telesec`, or tap **⚙️ Settings** on any chat's [owner panel](#per-chat-transcription-modes).
+Four switches cover all chats: transcription (on by default), history (off by default), dossiers (off by default), and [deletion alerts](#deletion-alerts) (on by default). One more button sets how long history is kept (forever by default). Change them in your private chat with the bot: send `/telesec`, or tap **⚙️ Settings** on any chat's [owner panel](#per-chat-transcription-modes).
 
 ```text
 Telesec settings · all chats
 One chat: Manage Bot in that chat.
-Keep history: forever
+Deletion alerts are paused while history is off.
 Dossier model: ai-gateway / google/gemini-3.8-flash
 Voice cleanup: gemini / gemini-3.8-flash
-[• Transcribe] [Don't transcribe]
-[Save history] [• Don't save]
-[• Forever] [1 year] [90 days] [30 days]
-[Keep dossiers] [• No dossiers]
+[🎙️ Transcription ✅]
+[🗂️ History ❌]
+[⏳ Keep history: forever ›]
+[📇 Dossiers ❌]
+[🔔 Deletion alerts ✅]
 ```
 
-![Real Telegram screenshot of Settings in the owner's private chat with the bot: "Telesec settings · all chats", Keep history: forever, the dossier and voice cleanup models, then the Transcribe / Don't transcribe, Save history / Don't save, Forever / 1 year / 90 days / 30 days, and Keep dossiers / No dossiers rows, with transcription, history, and dossiers on and history kept forever.](docs/images/settings.png)
+Each feature is one button with its emoji and state: tap ✅ to turn it off, ❌ to turn it on. The screenshot below shows the 0.16 layout, with two buttons per switch; it is retaken after the 0.17.0 deploy.
+
+![Real Telegram screenshot of the 0.16 Settings in the owner's private chat with the bot: "Telesec settings · all chats", Keep history: forever, the dossier and voice cleanup models, then the Transcribe / Don't transcribe, Save history / Don't save, Forever / 1 year / 90 days / 30 days, and Keep dossiers / No dossiers rows, with transcription, history, and dossiers on and history kept forever.](docs/images/settings.png)
 
 Or from the terminal:
 
@@ -53,15 +56,15 @@ hermes telesec settings set retention 90
 hermes telesec settings set retention forever
 ```
 
-A change applies to the next update; no restart is needed. To turn history or the dossier off for one chat, use that chat's [owner panel](#per-chat-history-and-dossier); `hermes telesec settings` also counts such chats. Turning dossiers on asks first and names the model that will receive chat text. Dossiers are built from history, so while history is off they are paused, and Settings says so. Settings speaks Russian when your Telegram app is set to Russian (`Настройки Telesec`).
+A change applies to the next update; no restart is needed. To turn history, the dossier, or deletion alerts off for one chat, use that chat's [owner panel](#per-chat-history-and-dossier); `hermes telesec settings` also counts such chats. Turning dossiers on asks first and names the model that will receive chat text. Dossiers and deletion alerts are built from history, so while history is off they are paused, and Settings says so. Settings speaks Russian when your Telegram app is set to Russian (`Настройки Telesec`).
 
-The **Forever · 1 year · 90 days · 30 days** row sets how long saved history is kept, and the `Keep history:` line shows the value in effect. A shorter time asks first; a longer one applies at once. History is deleted a whole month at a time: once all of a month is older than the chosen time, the next cleanup deletes it, so the current month always stays. Cleanup runs when the gateway starts, when a `hermes` command loads Telesec (such as `hermes telesec settings`), and at most hourly while Business messages arrive. The row stays while history is off, because cleanup keeps running. In the terminal, `hermes telesec settings set retention N` sets any number of days, and Settings shows such a value as its own button (for example `• 45 days`) until you pick another. See [retention and removal](docs/HISTORY.md#retention-and-removal).
+**⏳ Keep history: forever ›** shows how long saved history is kept and opens a picker: **Forever · 1 year · 90 days · 30 days**, and **‹ Settings** to go back. A shorter time asks first; a longer one applies at once. History is deleted a whole month at a time: once all of a month is older than the chosen time, the next cleanup deletes it, so the current month always stays. Cleanup runs when the gateway starts, when a `hermes` command loads Telesec (such as `hermes telesec settings`), and at most hourly while Business messages arrive. The button stays while history is off, because cleanup keeps running. In the terminal, `hermes telesec settings set retention N` sets any number of days, and the picker shows such a value as its own button (for example `• 45 days`) until you pick another. See [retention and removal](docs/HISTORY.md#retention-and-removal).
 
 The last lines show the model that writes dossiers (`your main model` when its task follows the main model) and the model that cleans up voice transcripts (or `off`), as configured. They are read-only: choose the dossier model with `hermes model` → Telesec dossiers ([dossier model](#dossier-model)) and the cleanup model in the [configuration](#configuration). A warning line follows the dossier model when its `extra_body` still has the gateway-only `providerOptions` on another provider.
 
 Only an owner of every Business connection the bot knows about can change the switches and retention; another verified owner sees them read-only. Anyone else's `/telesec`, `/telesec` with more text after it, and `/telesec` in a group go to Hermes as usual, where the `/telesec` command only says that Telesec settings are for the Business account owner. Settings are never posted into a Business chat, and a `/telesec` typed in a Business chat never gets an answer there.
 
-Transcription, history, and retention are stored in `$HERMES_HOME/data/telesec/settings.json`, dossiers in `$HERMES_HOME/data/telesec/dossiers/settings.json`, with `0600` permissions and atomic writes. The files hold only the switches, the retention in days (`0` is forever), and when and how (`telegram`, `cli`, or `migration`) each was set. If `settings.json` becomes corrupt or unreadable, the gateway keeps the switches it last read (transcription on and history off if it never read any) and logs it; Telegram shows an error instead of overwriting it, and only `hermes telesec settings set` backs it up and starts a new one.
+Transcription, history, deletion alerts, and retention are stored in `$HERMES_HOME/data/telesec/settings.json`, dossiers in `$HERMES_HOME/data/telesec/dossiers/settings.json`, with `0600` permissions and atomic writes. The files hold only the switches, the retention in days (`0` is forever), and when and how (`telegram`, `cli`, or `migration`) each was set. If `settings.json` becomes corrupt or unreadable, the gateway keeps the switches it last read (transcription on and history off if it never read any) and logs it; Telegram shows an error instead of overwriting it, and only `hermes telesec settings set` backs it up and starts a new one.
 
 Hermes core has more commands than Telegram's "/" menu holds, so `/telesec` is not in the menu by default. To add it, set this in the Hermes config:
 
@@ -92,20 +95,32 @@ The main control is the owner panel. In any chat where the Business bot is conne
 
 ```text
 Owner panel: Casey (@casey) · chat 991
-Transcription: off
-[both] [own] [peer] [• off]
-[Reset to default]
-[• Save history] [Don't save]
-[• Keep dossier] [No dossier]
-[📊 Stats] [Dossier]
-[⚙️ Settings] [Refresh]
+[🎙️ Transcription: off ›]
+[🗂️ History ✅]
+[📇 Dossier ✅]
+[🔔 Deletion alerts ✅]
+[📊 Stats] [📖 Open dossier]
+[⚙️ Settings] [🔄 Refresh]
 ```
 
-![Real Telegram screenshot of the owner panel in the owner's private chat with the bot: Transcription: off, with mode buttons, Reset to default, the Save history / Don't save and Keep dossier / No dossier rows (both on), Stats, Dossier, ⚙️ Settings, and Refresh. The contact's name, username, and chat ID are blurred.](docs/images/owner-panel.png)
+**🎙️ Transcription** shows the mode and opens a picker in the same message:
 
-Tap a mode to set it, or Reset to return to the default; the panel message updates in place. The history and dossier rows below it work the same way for this chat ([per-chat history and dossier](#per-chat-history-and-dossier)). The header always ends with `chat <id>`, so when you reply to a panel message to ask the agent about that chat, the reply names the chat. The panel speaks Russian when your Telegram app is set to Russian (`Панель владельца`, `Расшифровка: выкл`, mode buttons `все`, `мои`, `собеседника`, `выкл`) and English otherwise; modes are still stored as `both`, `own`, `peer`, and `off`. Only you see the panel: it lives in your private chat with the bot and the contact sees nothing. Only a verified owner gets the panel. Anyone else's `/start bizChat…` is treated as an ordinary message, and a panel button pressed by anyone else gets a short "Not allowed" alert.
+```text
+Owner panel: Casey (@casey) · chat 991
+🎙️ Transcription: off
+both: yours and the contact's · own: only yours · peer: only the contact's · off: none
+[both] [own] [peer] [• off]
+[Reset to default]
+[« Back]
+```
 
-To confirm you are the owner, the bot asks Telegram who owns the Business connections it knows: ones Telegram reported connecting since the gateway started, ones with any Business message since the gateway started (both kept in memory only), ones whose owner the modes file records, ones it already looked up the owner for, and the connections in the history catalog (read even while history is off). So any message in the chat, yours or the contact's, is enough; no command is needed. While the gateway knows no Business connection at all, Manage Bot answers with a hint to send any message in that chat and tap Manage Bot again. Once it knows one, the `/start` of someone whose connection it does not know yet is handled as an ordinary message. The panel reads and shows per-chat data (such as stats) only for a connection that history lists for the chat or that a message was seen on; otherwise a section says the connection is not known yet. Mode buttons work for the chat right away, even after a restart and before the contact writes again; modes are stored per owner, so your change never touches another owner's chat with the same contact. With transcription off in [Settings](#settings), the panel says so and shows no mode buttons. Other features add their own panel sections, such as the chat's [contact dossier](docs/DOSSIERS.md#in-telegram).
+The screenshot below shows the 0.16 layout, with mode and switch rows; it is retaken after the 0.17.0 deploy.
+
+![Real Telegram screenshot of the 0.16 owner panel in the owner's private chat with the bot: Transcription: off, with mode buttons, Reset to default, the Save history / Don't save and Keep dossier / No dossier rows (both on), Stats, Dossier, ⚙️ Settings, and Refresh. The contact's name, username, and chat ID are blurred.](docs/images/owner-panel.png)
+
+Tap a mode to set it, or Reset to return to the default; the panel message goes back to the main view with the new mode. The history, dossier, and deletion alert buttons below it switch those for this chat ([per-chat history and dossier](#per-chat-history-and-dossier)). The header always ends with `chat <id>`, so when you reply to a panel message to ask the agent about that chat, the reply names the chat. The panel speaks Russian when your Telegram app is set to Russian (`Панель владельца`, `🎙️ Расшифровка: выкл ›`, mode buttons `все`, `мои`, `собеседника`, `выкл`) and English otherwise; modes are still stored as `both`, `own`, `peer`, and `off`. Only you see the panel: it lives in your private chat with the bot and the contact sees nothing. Only a verified owner gets the panel. Anyone else's `/start bizChat…` is treated as an ordinary message, and a panel button pressed by anyone else gets a short "Not allowed" alert.
+
+To confirm you are the owner, the bot asks Telegram who owns the Business connections it knows: ones Telegram reported connecting since the gateway started, ones with any Business message since the gateway started (both kept in memory only), ones whose owner the modes file records, ones it already looked up the owner for, and the connections in the history catalog (read even while history is off). So any message in the chat, yours or the contact's, is enough; no command is needed. While the gateway knows no Business connection at all, Manage Bot answers with a hint to send any message in that chat and tap Manage Bot again. Once it knows one, the `/start` of someone whose connection it does not know yet is handled as an ordinary message. The panel reads and shows per-chat data (such as stats) only for a connection that history lists for the chat or that a message was seen on; otherwise a section says the connection is not known yet. Mode buttons work for the chat right away, even after a restart and before the contact writes again; modes are stored per owner, so your change never touches another owner's chat with the same contact. With transcription off in [Settings](#settings), the panel says so and shows no transcription button. Other features add their own panel sections, such as the chat's [contact dossier](docs/DOSSIERS.md#in-telegram).
 
 Panel taps and all Business message updates stop update propagation before Hermes' group-99 dispatch counter, so after a quiet period the core "Telegram ingress is healthy but deaf" warning can report a stale gap. The gap resets on reconnect and needs no action.
 
@@ -137,22 +152,24 @@ The mode is checked once, before any download, speech recognition, or cleanup. A
 
 ## Per-chat history and dossier
 
-The same owner panel turns history and the dossier on or off for one chat, in the same style as transcription modes: "•" marks the value in effect.
+The same owner panel turns history, the dossier, and deletion alerts on or off for one chat. Each is one button that shows its state; a tap switches it.
 
-| Row | Choices | Default |
+| Button | States | Default |
 |---|---|---|
-| History | **Save history**, **Don't save** | Save history |
-| Dossier | **Keep dossier**, **No dossier** | Keep dossier |
+| 🗂️ History | ✅ on, ❌ off | on |
+| 📇 Dossier | ✅ on, ❌ off | on |
+| 🔔 Deletion alerts | ✅ on, ❌ off | on |
 
-- **Don't save** stops history for this chat: new messages, edits, and deletions are not recorded. The chat's dossier pauses too, because dossiers are built from history.
-- **No dossier** keeps history but skips the chat's dossier: the worker leaves it out of contact and persona updates, a running Refresh stops, and `/dossier` in the chat posts nothing (the bot tells you why in your private chat with it). The stored dossier stays as it was and you can still read it in the Dossier section, without Refresh.
-- **🗑 Erase saved history** shows under the history row, or under the `History: off in Settings` line, when history holds messages from the chat and the chat saves nothing now: it is set to Don't save, the [old server scope](#moving-from-the-history-environment-variables) keeps it out, or history is off in Settings. It asks first, in the same message: `Erase 12 saved messages from this chat? Its dossier is deleted too. This cannot be undone.` **Erase** stops a running dossier refresh, deletes every saved message of this chat on your Business connection and the chat's entry in the contact list, and then its dossier. Stats then show no history for the chat, and the chat keeps its setting. Erased history does not come back by itself: to bring it back, turn the chat on (**Save history**) and run [`history import`](docs/HISTORY.md#import-past-messages) again. The button refuses while the chat saves history (`Choose Don't save for this chat first`) or while chat settings can't be read (`Chat settings can't be read; try again later`), so an old or repeated tap erases nothing. It never touches another owner's chat with the same contact.
+- **🗂️ History ❌** stops history for this chat: new messages, edits, and deletions are not recorded. The chat's dossier pauses too, because dossiers are built from history.
+- **📇 Dossier ❌** keeps history but skips the chat's dossier: the worker leaves it out of contact and persona updates, a running Refresh stops, and `/dossier` in the chat posts nothing (the bot tells you why in your private chat with it). The stored dossier stays as it was and you can still read it with **📖 Open dossier**, without Refresh.
+- **🔔 Deletion alerts ❌** stops [deletion alerts](#deletion-alerts) for this chat; history and the dossier go on.
+- **🗑 Erase saved history** shows under the history button, or under the `History: off in Settings` line, when history holds messages from the chat and the chat saves nothing now: its history is off, the [old server scope](#moving-from-the-history-environment-variables) keeps it out, or history is off in Settings. It asks first, in the same message: `Erase 12 saved messages from this chat? Its dossier is deleted too. This cannot be undone.` **Erase** stops a running dossier refresh, deletes every saved message of this chat on your Business connection and the chat's entry in the contact list, and then its dossier. Stats then show no history for the chat, and the chat keeps its setting. Erased history does not come back by itself: to bring it back, turn the chat's history on (**🗂️ History ❌**) and run [`history import`](docs/HISTORY.md#import-past-messages) again. The button refuses while the chat saves history (`Turn 🗂️ History off for this chat first`) or while chat settings can't be read (`Chat settings can't be read; try again later`), so an old or repeated tap erases nothing. It never touches another owner's chat with the same contact.
 
-![Real Telegram screenshot of the owner panel for a chat set to Don't save: Transcription: off, Dossier: needs history, the mode buttons, Reset to default, Save history / • Don't save, 🗑 Erase saved history, Stats, Dossier, ⚙️ Settings, and Refresh. The contact's name, username, and chat ID are blurred.](docs/images/owner-panel-erase.png)
+![Real Telegram screenshot of the 0.16 owner panel for a chat with history off: Transcription: off, Dossier: needs history, the mode buttons, Reset to default, Save history / • Don't save, 🗑 Erase saved history, Stats, Dossier, ⚙️ Settings, and Refresh. The contact's name, username, and chat ID are blurred.](docs/images/owner-panel-erase.png)
 
-In Russian the rows read «Сохранять историю» / «Не сохранять», «🗑 Стереть сохранённую историю», and «Вести досье» / «Не вести». A row that cannot apply is hidden, and a short line says why: `History: off in Settings` (history is off for all chats), `Dossier: off in Settings`, or `Dossier: needs history` (this chat saves no history). A chat the [old server scope](#moving-from-the-history-environment-variables) keeps out shows **Don't save** with "•" and the line `History: off by the old server scope` («История: выключена старой настройкой сервера»); **Save history** turns it on. A group chat has no dossier row, since dossiers cover private chats only. Reset to default stays transcription-only: on is the default for history and the dossier and is not stored (except history turned on over the old server scope), so the on button already clears the setting.
+In Russian the buttons read «🗂️ История», «📇 Досье», «🔔 Уведомления об удалении», and «🗑 Стереть сохранённую историю». A button that cannot apply is hidden, and a short line says why: `History: off in Settings` (history is off for all chats), `Dossier: off in Settings`, `Dossier: needs history` (this chat saves no history), `Deletion alerts: off in Settings`, or `Deletion alerts: need history`. A chat the [old server scope](#moving-from-the-history-environment-variables) keeps out shows **🗂️ History ❌** and the line `History: off by the old server scope` («История: выключена старой настройкой сервера»); a tap turns it on. A group chat has no dossier button, since dossiers cover private chats only. On is the default for history, the dossier, and deletion alerts and is not stored (except history turned on over the old server scope), so turning one on clears the setting. Older panel messages keep working: their buttons still set what they say, and the message then shows the new layout.
 
-**Off is not delete.** History already saved stays until you erase it (above, or `hermes telesec history forget` below), and retention and the size cap still prune it ([removal](docs/HISTORY.md#retention-and-removal)). Edits and deletions of older messages that arrive while the chat is paused are not recorded, and turning history back on leaves a gap. A paused dossier stays frozen; `hermes telesec dossier forget` deletes it. History keeps recording under No dossier, so Keep dossier later catches up and sends what was written meanwhile to the model. The persona leaves a paused chat out of its next rebuild; only erasing or forgetting the chat resets it at once.
+**Off is not delete.** History already saved stays until you erase it (above, or `hermes telesec history forget` below), and retention and the size cap still prune it ([removal](docs/HISTORY.md#retention-and-removal)). Edits and deletions of older messages that arrive while the chat is paused are not recorded, and turning history back on leaves a gap. A paused dossier stays frozen; `hermes telesec dossier forget` deletes it. History keeps recording while the dossier is off, so turning it back on later catches up and sends what was written meanwhile to the model. The persona leaves a paused chat out of its next rebuild; only erasing or forgetting the chat resets it at once.
 
 From the terminal:
 
@@ -162,6 +179,7 @@ hermes telesec chat get 991
 hermes telesec chat set 991 --history off
 hermes telesec chat set @alice --dossier off
 hermes telesec chat set 991 --history on --dossier on
+hermes telesec chat set 991 --alerts off
 hermes telesec chat get 991 --format json
 hermes telesec chat scope
 hermes telesec chat scope clear --yes
@@ -169,15 +187,15 @@ hermes telesec history forget --chat 991
 hermes telesec history forget --chat 991 --yes
 ```
 
-`chat` uses the same chat selectors and owner rules as [`mode`](#per-chat-transcription-modes) (`--owner`, `--connection`). When those rules find no owner, it uses the one owner who has a setting for that chat. A numeric chat id is stored as Telegram sends it, so `0991` means chat `991`. `get` shows the stored values and the values in effect, with the reason when something is off elsewhere (`scope`, `settings`, `needs_history`, `no_history`, `private_only`, or `unreadable`). In JSON, `chat list` and `chat get` report `effective_history` and `effective_dossier`, and so do `mode list` and `mode get`. They use each chat's type from history, so a list shows the same values as the panel. When no owner can be found, a chat that some owner paused reads as off. A change applies to the next update; no restart is needed.
+`chat` uses the same chat selectors and owner rules as [`mode`](#per-chat-transcription-modes) (`--owner`, `--connection`). When those rules find no owner, it uses the one owner who has a setting for that chat. A numeric chat id is stored as Telegram sends it, so `0991` means chat `991`. `get` shows the stored values and the values in effect, with the reason when something is off elsewhere (`scope`, `settings`, `needs_history`, `no_history`, `private_only`, or `unreadable`). In JSON, `chat list` and `chat get` report `effective_history`, `effective_dossier`, and `effective_alerts`; `mode list` and `mode get` report the first two. They use each chat's type from history, so a list shows the same values as the panel. When no owner can be found, a chat that some owner paused reads as off. A change applies to the next update; no restart is needed.
 
 `history forget` erases one chat's saved history and its dossier, like the panel's Erase button. It takes the same chat selectors as `history show` (`--chat`, `--contact`, `--connection`). Without `--yes` it only prints what it would erase and exits with code 1. It also works while the chat still saves history, and then says that new messages are saved again. `hermes telesec history forget --all --yes` erases all saved history and every dossier, including the owner persona; Telegram has no button for that. A running gateway notices the erase the next time it reads the chat; no restart is needed.
 
 The settings are stored per (owner, chat) in `$HERMES_HOME/data/telesec/chat-settings.json` with `0600` permissions and atomic writes. Only "off" values are stored, and "on" for a chat's history turned on over the old server scope, with when and how (`chat` or `cli`) they were set; no message text and no names. The old server scope rule, if any, is stored there too, under `legacy_scope`. Your setting covers only your own chat with the contact, never another owner's. A panel change also records the chat's connection owner in the modes file, so history can check the setting without asking Telegram.
 
-The checks fail closed. If one owner paused a chat id and the owner of another connection with the same chat id cannot be found, that connection's history for the chat is skipped until Telegram answers (this only happens when several Business accounts use one bot). If `chat-settings.json` becomes corrupt or unreadable, the gateway keeps the values it last read; if it never read any, history and dossiers pause for every chat, the log warns once, and the panel says `Chat settings can't be read; history and dossiers are paused.` Telegram never overwrites a corrupt file and shows an error instead; `hermes telesec chat set <chat> ... --owner ID` backs it up and starts a new one. The new file keeps the [old server scope rule](#moving-from-the-history-environment-variables) from the damaged one when that part can still be read, or stores it again from the `TELESEC_HISTORY_*` variables when they are set. Otherwise the command and the log say the rule was lost with the backup, and the chats it kept out start saving history.
+The checks fail closed. If one owner paused a chat id and the owner of another connection with the same chat id cannot be found, that connection's history for the chat is skipped until Telegram answers (this only happens when several Business accounts use one bot). If `chat-settings.json` becomes corrupt or unreadable, the gateway keeps the values it last read; if it never read any, history and dossiers pause for every chat, the log warns once, and the panel says `Chat settings can't be read; history, dossiers and deletion alerts are paused.` Telegram never overwrites a corrupt file and shows an error instead; `hermes telesec chat set <chat> ... --owner ID` backs it up and starts a new one. The new file keeps the [old server scope rule](#moving-from-the-history-environment-variables) from the damaged one when that part can still be read, or stores it again from the `TELESEC_HISTORY_*` variables when they are set. Otherwise the command and the log say the rule was lost with the backup, and the chats it kept out start saving history.
 
-Telesec 0.11.0 and older do not read `chat-settings.json`: after a downgrade, Don't save and No dossier stop applying and those chats are recorded again.
+Telesec 0.11.0 and older do not read `chat-settings.json`: after a downgrade, a chat's history and dossier switches stop applying and those chats are recorded again. Telesec 0.16 and older do not know deletion alerts: they keep a chat's stored `alerts: off` until they rewrite that chat's entry, which can drop it.
 
 ### Moving from the history environment variables
 
@@ -185,23 +203,23 @@ Telesec 0.13 and older chose which chats history records with `TELESEC_HISTORY_C
 
 On the first start with any of them set, the plugin keeps the old filter as a stored rule: it saves the filter as 0.13 and older read it under `legacy_scope` in `chat-settings.json` and records that it ran. The rule still works per connection and chat, as before: a chat it keeps out saves no history and its dossier pauses, and that holds for a chat that never wrote to you before too. A value that matched nothing before, such as a misspelled chat type, still matches nothing. An empty variable is no filter, as before, so it stores nothing. Until the rule is stored, for example while `chat-settings.json` can't be written, the variables keep applying, and the next start tries again.
 
-While the variables stay set, they apply too: a chat is kept out when the stored rule or the variables keep it out. Telesec 0.13 and older read only the variables, so keep them set while you may go back to 0.13 or older, and remove them from the profile's environment after that. Going back can also undo **Save history** for a chat the rule keeps out: when you change any setting of that chat in 0.13 and no "off" is left, 0.13 deletes the chat's entry, so the chat follows the variables again.
+While the variables stay set, they apply too: a chat is kept out when the stored rule or the variables keep it out. Telesec 0.13 and older read only the variables, so keep them set while you may go back to 0.13 or older, and remove them from the profile's environment after that. Going back can also undo turning history on for a chat the rule keeps out: when you change any setting of that chat in 0.13 and no "off" is left, 0.13 deletes the chat's entry, so the chat follows the variables again.
 
-- In a chat's panel, a chat the rule keeps out on every connection it records through shows **Don't save** with "•" and the line `History: off by the old server scope`. **Save history** turns it on, and so does `hermes telesec chat set <chat> --history on`: the chat is then stored with history on, which overrides the rule and the variables.
+- In a chat's panel, a chat the rule keeps out on every connection it records through shows **🗂️ History ❌** and the line `History: off by the old server scope`. A tap turns it on, and so does `hermes telesec chat set <chat> --history on`: the chat is then stored with history on, which overrides the rule and the variables.
 - `hermes telesec chat scope` shows the stored rule and the variables in effect, with counts only. `chat list`, `chat get`, and `hermes telesec settings` say when they apply.
-- `hermes telesec chat scope clear --yes` drops the stored rule. Chats it kept out start saving history with their next message, except chats set to Don't save and chats the variables keep out while they are set. A later start never stores the variables as the rule again. Without `--yes` it only explains and exits with code 1.
+- `hermes telesec chat scope clear --yes` drops the stored rule. Chats it kept out start saving history with their next message, except chats with history off and chats the variables keep out while they are set. A later start never stores the variables as the rule again. Without `--yes` it only explains and exits with code 1.
 
 A filter that kept no private chat out stores no rule. The gateway log says what was stored, with counts only. Each later start logs one warning for every variable still set.
 
 ## Correspondence history
 
-Turn history on in [Settings](#settings) (**Save history**), or from the terminal; no restart is needed:
+Turn history on in [Settings](#settings) (**🗂️ History**), or from the terminal; no restart is needed:
 
 ```bash
 hermes telesec settings set history on
 ```
 
-History then records text in private Business chats. To leave one chat out, tap **Don't save** in its [owner panel](#per-chat-history-and-dossier) or run `hermes telesec chat set 991 --history off`. Then search by contact:
+History then records text in private Business chats. To leave one chat out, tap **🗂️ History ✅** in its [owner panel](#per-chat-history-and-dossier) or run `hermes telesec chat set 991 --history off`. Then search by contact:
 
 ```bash
 hermes telesec history contacts --search alice --limit 20
@@ -213,6 +231,23 @@ hermes telesec history deletions --status unexplained --limit 20
 History captures new text messages, edits, and deletions as Telegram delivers them. It preserves deleted text and distinguishes likely corrections, duplicates, unexplained deletions, and missing originals. It does not fetch old conversations, but you can import one chat's earlier messages from a Telegram Desktop export with `hermes telesec history import result.json --chat 991` ([import past messages](docs/HISTORY.md#import-past-messages)). Contact names and observed aliases are searchable; ambiguous names require an explicit choice.
 
 Canonical storage is profile-local JSONL with a rebuildable contact catalog. Capture and search require no LLM. Media and captions are excluded from history in this version. [History configuration, retention, and CLI](docs/HISTORY.md).
+
+## Deletion alerts
+
+With history on, Telesec tells you in your private chat with the bot when a contact deletes a message that no later message explains. It is on by default for every private Business chat; groups are never recorded.
+
+```text
+🔔 Deleted message: Casey (@casey) · chat 991
+Unexplained: no later message replaced it.
+[👁 Show text] [Chat panel]
+```
+
+- **Quiet by design.** History waits about two minutes after a deletion, then classifies it. A likely correction (deleted and sent again with a small change) or a likely duplicate (the same text sent again) sends nothing, and neither does a deletion of your own message.
+- **Text on request.** The alert names the contact and the class, never the text. **👁 Show text** adds the deleted text to the alert as a quote, read from history at that moment; after an erase it says `The text is no longer saved`. **Chat panel** opens that chat's [owner panel](#per-chat-transcription-modes).
+- **Once.** The classification is stored in history, so an alert is never repeated, also not after a restart.
+- **Off switches.** **🔔 Deletion alerts** in [Settings](#settings) turns alerts off for all chats, and the same button in a chat's panel for that chat, or `hermes telesec settings set alerts off` and `hermes telesec chat set 991 --alerts off`. Alerts need history and pause while it is off.
+
+Alerts speak Russian after you use the bot with a Russian Telegram app (`🔔 Удалённое сообщение`). Alert taps never reach the Hermes agent. Telesec classifies a deletion when a timer fires or the next message arrives; a deletion classified by `hermes telesec history` maintenance in a terminal, rather than by the gateway, sends no alert. `hermes telesec history deletions --status unexplained` lists the same deletions ([history](docs/HISTORY.md)).
 
 ## Correspondence stats
 
@@ -238,7 +273,7 @@ To share stats with the contact, type `/stats` (all history) or `/stats 7d`, `30
 
 ## Contact dossiers (opt-in)
 
-With history enabled, turn dossiers on in [Settings](#settings) (**Keep dossiers**, with a confirmation; offered only to an owner of every Business connection the bot knows about) or with `hermes telesec settings set dossiers on` (`hermes telesec dossier enable` still works); no restart is needed. A gateway-only background worker then keeps one short document for every private Business contact (tap **No dossier** in a chat's [owner panel](#per-chat-history-and-dossier) to skip one), plus one owner writing persona. A dossier is written for you to read: who the contact is, what you agreed, dates and amounts, open questions, and how to work with them. A few minutes after a chat goes quiet, the model rewrites the document with what changed: new messages, edits, and deletions. It keeps the previous version, so you can see the last change.
+With history enabled, turn dossiers on in [Settings](#settings) (**📇 Dossiers**, with a confirmation; offered only to an owner of every Business connection the bot knows about) or with `hermes telesec settings set dossiers on` (`hermes telesec dossier enable` still works); no restart is needed. A gateway-only background worker then keeps one short document for every private Business contact (tap **📇 Dossier ✅** in a chat's [owner panel](#per-chat-history-and-dossier) to skip one), plus one owner writing persona. A dossier is written for you to read: who the contact is, what you agreed, dates and amounts, open questions, and how to work with them. A few minutes after a chat goes quiet, the model rewrites the document with what changed: new messages, edits, and deletions. It keeps the previous version, so you can see the last change.
 
 To correct a dossier, add to its owner note. The note is your own truth: the model follows it, including a request to leave something out, and never copies it into the document. A changed note rewrites the dossier on the next cycle. `--append` adds a paragraph to the note; `--text` replaces the whole note, and for a note converted from an older version, or one over 500 characters, it needs `--replace` ([owner note](docs/DOSSIERS.md#owner-note)).
 
@@ -250,7 +285,7 @@ hermes telesec dossier run --contact @alice
 hermes telesec dossier show --contact @alice --previous
 ```
 
-In Telegram, the panel's **Dossier** section shows the chat's dossier as a rich message in your app's language (Russian or English): the document, your note marked as not posted, and one status line, with **Refresh** and **My persona** (the owner persona) buttons. Message refs such as `[m123]` stay in the stored document and are never shown: not on the screen, in the `/dossier` post, or in the default `show` and `export` output. Before the first persona is written, **My persona** says whether it still needs 10 sent messages or comes at the next dossier cycle. The on/off switch is in Settings.
+In Telegram, the panel's **📖 Open dossier** button shows the chat's dossier as a rich message in your app's language (Russian or English): the document, your note marked as not posted, and one status line, with **Refresh** and **My persona** (the owner persona) buttons. Message refs such as `[m123]` stay in the stored document and are never shown: not on the screen, in the `/dossier` post, or in the default `show` and `export` output. Before the first persona is written, **My persona** says whether it still needs 10 sent messages or comes at the next dossier cycle. The on/off switch is in Settings.
 
 Sending exactly `/dossier` in a private Business chat, as the owner, deletes the command and posts that contact's dossier there, titled "Dossier" («Досье»): the same document as the Dossier screen, without your note, refs, or owner-only details such as the model or update times. If the chat has new, edited, or deleted messages the dossier has not seen, your note changed, or there is no dossier yet, the bot first refreshes it once, like **Refresh**; if that fails, nothing is posted. If a message is edited or deleted, or the note changes, during that refresh, nothing is posted either. The dossier is written for you, and the contact reads it as it is, so check the Dossier screen first. The model uses your note when it writes the dossier, so a fact from the note can be in it. Telegram allows the post only if the contact wrote in the last 24 hours; any message counts, including voice, photos, stickers, and files. Telesec refuses at once only when it knows the contact has not written for 24 hours; otherwise it tries. If Telegram refuses because the contact has not written for 24 hours, you get that reason; any other refusal names Telegram's error, with the 24-hour rule as one possible cause when Telesec saw no recent message from the contact. Unlike the owner panel, `/dossier` is deliberately visible to the contact: its purpose is to share the dossier with them. When nothing is posted, the bot tells you why in your private chat with it instead ([`/dossier` in a chat](docs/DOSSIERS.md#dossier-in-a-chat)). When the send times out or loses its connection, the dossier may be in the chat, so the bot says that and asks you to check the chat before you send `/dossier` again.
 
@@ -282,7 +317,7 @@ The plugin registers native Telegram handlers in group `-100`, before ordinary H
 
 Owners who deliberately want unhandled Business updates to continue into Hermes can set `TELESEC_AGENT_ENABLE=1` in the active profile's `.env` and restart the gateway. The ordinary core auth/agent rules then apply; handled media and owner controls remain consumed.
 
-History has its own switch in [Settings](#settings) and records eligible Business text updates independently of the ordinary DM allowlist. Telegram's selected Business-chat scope, a chat's Don't save, and the [old server scope](#moving-from-the-history-environment-variables) rule, if one is stored, determine what is captured.
+History has its own switch in [Settings](#settings) and records eligible Business text updates independently of the ordinary DM allowlist. Telegram's selected Business-chat scope, a chat's history switch, and the [old server scope](#moving-from-the-history-environment-variables) rule, if one is stored, determine what is captured.
 
 ## Upgrade from 0.9.x
 
@@ -475,7 +510,8 @@ Source files:
 - `dossier_view.py`: pure Telegram views of dossiers and the `/dossier` post (rich HTML, plain fallback, buttons).
 - `dossier_panel.py`: the panel's Dossier section and the owner's `/dossier` command.
 - `owner_panel.py`: the owner panel's callbacks, section registry, and rendering.
-- `chat_settings.py`: per-chat history and dossier switches and the `chat` CLI.
+- `chat_settings.py`: per-chat history, dossier, and deletion alert switches and the `chat` CLI.
+- `deletion_alerts.py`: deletion alerts in the owner's private chat with the bot.
 - `global_settings.py`: the switches for all chats, their one-time migration, and the `settings` CLI.
 - `settings_panel.py`: the panel's Settings section, also opened with `/telesec`.
 
@@ -493,10 +529,12 @@ Telegram gateway event
   -> attached audio: metadata gate -> authoritative getFile-size gate -> transient download -> local ffprobe verification -> ffmpeg prefix probe
   -> unsupported attached-audio container: transient mono/16 kHz WAV normalization
   -> Hermes transcribe_audio (configured host STT; probe first for attached files)
+  -> raw publish: short outgoing message: edit_message_caption(..., caption_entities=[expandable], business_connection_id=...)
+                  otherwise: send_message(..., entities=[expandable], business_connection_id=...)
   -> optional ctx.llm structured cleanup
-  -> minimal structural sanity check / one feedback retry / raw last fallback
-  -> short outgoing message: edit_message_caption(..., caption_entities=[expandable], business_connection_id=...)
-  -> otherwise: send_message(..., entities=[expandable], business_connection_id=...)
+  -> minimal structural sanity check / one feedback retry / raw stays
+  -> changed and still fits: edit the same caption or reply (editMessageCaption / editMessageText)
+  -> raw longer than one message: cleanup first, then publish in parts
 ```
 
 Outgoing direction is checked against the owner returned by Telegram's `getBusinessConnection`; `sender_business_bot` is also accepted as an explicit outgoing signal. Caption text is plain text and limited conservatively to Telegram's 1024 UTF-16 code-unit ceiling. An existing caption is retained unchanged at the start, including its entities, then separated from the transcript by a blank line. A UTF-16-positioned `expandable_blockquote` entity covers only the appended transcript block.
@@ -506,11 +544,11 @@ Incoming messages, transcripts that do not fit in one caption, messages outside 
 ## Privacy and data
 
 - **No telemetry.** No analytics, usage reporting, tracking endpoint, or self-updater is included.
-- **Network.** The gateway's Telegram Bot API client downloads media, looks up Business owners, edits captions, sends transcripts/status messages, and handles owner-panel buttons. For the owner's `/dossier` it deletes that command and posts the contact's dossier into the same Business chat; when it posts nothing, the reason goes only to the owner's private chat with the bot. For the owner's `/stats` it edits that command into a stats card (`editMessageText` with a rich message), sends the card (`sendRichMessage`, else plain text) or a short notice into the same Business chat when the edit fails, and deletes the command and notice (`deleteBusinessMessages`). STT goes to the backend configured in Hermes, which may be local or external. Optional cleanup sends transcripts through `ctx.llm`; opt-in dossiers send retained private-chat text through the same host facade to their own [model task](#dossier-model), by default Vercel AI Gateway → Google with zero data retention, and Hermes may retry a failed call with its fallback chain or main model. When turned on, the dossier message check calls TypeSafe Jev through Vercel AI Gateway and fact extraction calls Cloudflare Workers AI, both directly over HTTPS. Provider retention and costs follow your selected backend. The plugin has no separate credential store and does not read credential files: the message check reads `AI_GATEWAY_API_KEY` and `AI_GATEWAY_BASE_URL`, and fact extraction `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`, through the Hermes secret scope of the active profile, and never stores or logs them.
+- **Network.** The gateway's Telegram Bot API client downloads media, looks up Business owners, edits captions, sends transcripts/status messages and edits them in place after cleanup, sends deletion alerts to the owner's private chat with the bot, and handles owner-panel buttons. For the owner's `/dossier` it deletes that command and posts the contact's dossier into the same Business chat; when it posts nothing, the reason goes only to the owner's private chat with the bot. For the owner's `/stats` it edits that command into a stats card (`editMessageText` with a rich message), sends the card (`sendRichMessage`, else plain text) or a short notice into the same Business chat when the edit fails, and deletes the command and notice (`deleteBusinessMessages`). STT goes to the backend configured in Hermes, which may be local or external. Optional cleanup sends transcripts through `ctx.llm`; opt-in dossiers send retained private-chat text through the same host facade to their own [model task](#dossier-model), by default Vercel AI Gateway → Google with zero data retention, and Hermes may retry a failed call with its fallback chain or main model. When turned on, the dossier message check calls TypeSafe Jev through Vercel AI Gateway and fact extraction calls Cloudflare Workers AI, both directly over HTTPS. Provider retention and costs follow your selected backend. The plugin has no separate credential store and does not read credential files: the message check reads `AI_GATEWAY_API_KEY` and `AI_GATEWAY_BASE_URL`, and fact extraction `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`, through the Hermes secret scope of the active profile, and never stores or logs them.
 - **Local processes.** Attached-audio checks run `ffprobe` for duration and `ffmpeg` for prefix extraction and normalization, using argument lists without a shell. They operate on transient media in the active profile's cache.
 - **Background work.** Claimed transcription runs asynchronously. Opt-in history schedules deletion classification and maintenance; dossiers use a gateway background thread that starts on adapter connect even while they are off and then only checks the stored switch every minute. Once they are on, cycles start at least 3 minutes after connection and normally 30 minutes apart, and send eligible private-chat text to the dossier model without another prompt; disable dossiers to stop new cycles.
 - **The owner's chat with the bot.** Telegram delivers your own chat with the bot (the owner panel and your agent chat) as Business updates too. The plugin ignores those copies: they are not captured, transcribed, counted, or used for dossiers, and the ordinary update for the same message still reaches Hermes.
-- **Stored data and retention.** `$HERMES_HOME/data/telesec/` holds the switches for all chats, owner/chat modes and connection-owner mappings, per-chat history and dossier switches, opt-in history JSONL and its contact catalog, and opt-in dossier documents with their previous versions, owner notes, the persona, and worker state. Modes and dossiers remain until explicitly removed. History is kept forever by default (Settings can keep it 1 year, 90 days, or 30 days) with a 1 GiB size target; pruning removes closed monthly partitions, so the current month and pending classifications can exceed the target. See [history removal](docs/HISTORY.md#retention-and-removal), [dossier removal](docs/DOSSIERS.md#storage-and-privacy), and [Update and remove](#update-and-remove).
+- **Stored data and retention.** `$HERMES_HOME/data/telesec/` holds the switches for all chats, owner/chat modes and connection-owner mappings, per-chat history, dossier, and deletion alert switches, opt-in history JSONL and its contact catalog, and opt-in dossier documents with their previous versions, owner notes, the persona, and worker state. Modes and dossiers remain until explicitly removed. History is kept forever by default (Settings can keep it 1 year, 90 days, or 30 days) with a 1 GiB size target; pruning removes closed monthly partitions, so the current month and pending classifications can exceed the target. See [history removal](docs/HISTORY.md#retention-and-removal), [dossier removal](docs/DOSSIERS.md#storage-and-privacy), and [Update and remove](#update-and-remove).
 - Voice/video/audio data is written only to the active Hermes profile's cache while it is processed. The newly created download, attached-audio probe, and any normalized full-file WAV are deleted in a `finally` block after success or failure.
 - The configured STT backend receives the media. Depending on your Hermes configuration, that backend may be local or external.
 - When cleanup is enabled, the configured host LLM receives the transcript. The system prompt treats transcript contents as untrusted data and forbids following embedded instructions.
@@ -518,7 +556,8 @@ Incoming messages, transcripts that do not fit in one caption, messages outside 
 - Error replies are disabled by default. When enabled, the first line of an exception may be sent to the Business chat.
 - Voice transcription uses an in-process duplicate key for 24 hours; it resets with the gateway. History uses durable event identities in its JSONL log.
 - History is off until turned on in Settings. Once enabled, retained text includes earlier edits and deleted messages. Telegram deletion is not erasure of the local archive; [retention and removal](docs/HISTORY.md#retention-and-removal) are separate controls. **Erase saved history** in a chat's panel or `history forget` deletes one chat's history and its dossier.
-- Contact dossiers are off until turned on in Settings, and pause while history is off. Don't save or No dossier in a chat's panel, or the old server scope rule, pauses that chat's dossier and keeps its messages out of the persona. Once enabled, private chat text from the backfill window and later messages goes to the [dossier model](#dossier-model), and, when they are on, to the message check and fact extraction; groups are never processed. Telesec posts a dossier into a chat only on the owner's `/dossier`, and never adds the owner note or the persona to it; a fact the model took from the note into the dossier is part of it. The post goes out only once the dossier has seen every deletion and edit Telesec recorded in the backfill window; older ones and those Telesec never saw are unknown, the dossier keeps what it learned from messages retention pruned, and the model that drops deleted facts can miss one. Dossiers keep a short document and its previous version, not a second archive; the owner note can reach the dossier model and, through the document, the message check. Their logs carry counts, codes, and error types only. `dossier forget` deletes a dossier and its owner note without touching history, and forgetting or erasing a chat that the persona or its previous version read resets the persona at once ([storage and privacy](docs/DOSSIERS.md#storage-and-privacy)).
+- Deletion alerts go only to the owner's private chat with the bot and hold no message text; the deleted text shows only after a tap on **Show text**, read from local history.
+- Contact dossiers are off until turned on in Settings, and pause while history is off. History or the dossier off in a chat's panel, or the old server scope rule, pauses that chat's dossier and keeps its messages out of the persona. Once enabled, private chat text from the backfill window and later messages goes to the [dossier model](#dossier-model), and, when they are on, to the message check and fact extraction; groups are never processed. Telesec posts a dossier into a chat only on the owner's `/dossier`, and never adds the owner note or the persona to it; a fact the model took from the note into the dossier is part of it. The post goes out only once the dossier has seen every deletion and edit Telesec recorded in the backfill window; older ones and those Telesec never saw are unknown, the dossier keeps what it learned from messages retention pruned, and the model that drops deleted facts can miss one. Dossiers keep a short document and its previous version, not a second archive; the owner note can reach the dossier model and, through the document, the message check. Their logs carry counts, codes, and error types only. `dossier forget` deletes a dossier and its owner note without touching history, and forgetting or erasing a chat that the persona or its previous version read resets the persona at once ([storage and privacy](docs/DOSSIERS.md#storage-and-privacy)).
 - Existing Hermes/Telegram media caches are outside this plugin's ownership and are never scanned or deleted.
 
 ## Known limitations
@@ -526,15 +565,15 @@ Incoming messages, transcripts that do not fit in one caption, messages outside 
 - Native Telegram handlers require Hermes's in-process plugin mode; `plugins.isolation: host` cannot pass the Telegram Application to this plugin.
 - STT currently calls the undocumented core `tools.transcription_tools.transcribe_audio` function. Hermes provides backend-registration APIs but no documented plugin facade to invoke configured STT. This produces a catalog warning and can break on a core update; [submission notes](docs/CATALOG_SUBMISSION.md) explain the dependency.
 - History starts when enabled and captures text only; it cannot retrieve old chats, media, or captions. Local history preserves deleted text until retention, an erase, or explicit removal.
-- Dossiers need history and a separate opt-in. They cover private contacts (No dossier skips one) and keep what they learned after retention prunes history. A dossier is a model's summary and can be wrong; correct it with an owner note. Drafts and automatic replies are planned.
-- Attached-audio speech detection is a heuristic; recognized vocals may pass. LLM cleanup can change meaning and adds latency. Raw-first delivery is planned.
+- Dossiers need history and a separate opt-in. They cover private contacts (a chat's 📇 Dossier switch skips one) and keep what they learned after retention prunes history. A dossier is a model's summary and can be wrong; correct it with an owner note. Drafts and automatic replies are planned.
+- Attached-audio speech detection is a heuristic; recognized vocals may pass. LLM cleanup can change meaning; the contact may read the raw transcript before cleanup edits it, and a cleaned reply shows Telegram's "edited" mark. The surface is chosen from the raw text: a raw reply stays a reply even when the cleaned text would fit a caption.
 - Claimed updates stop before Hermes's group-99 ingress counter, which can produce a stale health warning. Telegram permissions and edit/send windows still apply.
 
 ## Failure behavior
 
 - Non-Telegram and non-Business events pass through untouched. Generic documents and video in Business chats are consumed without transcription unless agent routing is explicitly enabled.
 - Media skipped by a chat's [transcription mode](#per-chat-transcription-modes) is claimed before download and posts nothing. A modes file that was never readable, unknown direction under `own`/`peer`, or a failed owner lookup on a connection with no recorded owner transcribe as usual.
-- A chat set to [Don't save](#per-chat-history-and-dossier) records nothing, and so does a chat id that some owner paused while the owner of the update's connection is unknown. A chat the [old server scope](#moving-from-the-history-environment-variables) keeps out records nothing unless its owner turned it on, and an unknown owner counts as not. A `chat-settings.json` that was never readable pauses history and dossiers for every chat.
+- A chat with [history off](#per-chat-history-and-dossier) records nothing, and so does a chat id that some owner paused while the owner of the update's connection is unknown. A chat the [old server scope](#moving-from-the-history-environment-variables) keeps out records nothing unless its owner turned it on, and an unknown owner counts as not. A `chat-settings.json` that was never readable pauses history and dossiers for every chat.
 - Disabled and pass-through modules do not consume the event's duplicate identity.
 - A module enable/route exception is logged and contained, and later modules still receive the event.
 - Background module exceptions are contained and cannot crash the gateway.
@@ -542,10 +581,12 @@ Incoming messages, transcripts that do not fit in one caption, messages outside 
 - STT failure sends nothing unless error replies are enabled.
 - Empty STT output sends nothing.
 - Attached audio with missing/zero/oversize byte metadata, excessive known duration, unknown local duration, probe extraction/STT failure, or no meaningful probe speech is silently suppressed after being claimed; it never invokes the agent path.
-- An initial cleanup call that times out or is denied by the trust gate falls back to raw STT. In `enriched` mode, empty output or a catastrophic size change gets one feedback retry. Ordinary shortening, semantic edits, missing numbers, changed negations, and absent paragraph breaks are not validator failures; the first structurally usable enhancement is published.
+- The raw transcript is visible before cleanup starts. An initial cleanup call that times out or is denied by the trust gate leaves it as it is. In `enriched` mode, empty output or a catastrophic size change gets one feedback retry. Ordinary shortening, semantic edits, missing numbers, changed negations, and absent paragraph breaks are not validator failures; the first structurally usable enhancement is published.
 - Caption direction checks, length checks, edit-window checks, and definite caption-edit rejections fall back to a separate expandable transcript reply.
 - A recognized unsupported-entity response retries the selected caption or reply surface once without the new entity; PTB `BadRequest` counts as a definite caption rejection unless it is the recognized not-modified or unsupported-entity case, while `TimedOut`, other `NetworkError` failures, and unrelated exceptions suppress the reply fallback to avoid duplicates.
 - A successful caption edit never also sends a transcript reply.
+- A cleanup edit that Telegram rejects, that loses its connection, or that targets a deleted or owner-edited transcript leaves the raw text; Telesec never truncates text to make an edit fit. A gateway restart during cleanup also leaves the raw text.
+- A deletion alert that cannot be sent (unknown owner, Telegram error) is logged and dropped; history keeps the deletion.
 
 ## Testing
 

@@ -34,6 +34,7 @@ _DURATION_RE = re.compile(r"(\d+)([smhdw])")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 CLASSIFICATIONS = frozenset({"unexplained", "likely_correction", "likely_duplicate", "unclassifiable"})
 REPLACED = frozenset({"likely_duplicate", "likely_correction"})
+TRANSCRIPT_MARKER = "\U0001F399"  # first code point of the plugin transcript marker, as in dossier_support
 STATUS_PRECEDENCE = ("likely_duplicate", "likely_correction", "unexplained", "unclassifiable", "pending")
 SIDE = {"inbound": "received", "outbound": "sent"}
 _SIDE_LABEL = {"received": "received", "sent": "sent", "unknown": "unknown direction"}
@@ -158,8 +159,10 @@ class ChatScan:
             # The latest known direction wins; an unknown edit never erases it.
             if side != "unknown":
                 message.side = side
-            message.edited = message.edited or event_type == "message.edited"
             text = record.get("text")
+            # Telesec's own cleanup of a transcript reply (raw text first, then edited in place) is no owner edit.
+            transcript_cleanup = side == "sent" and isinstance(text, str) and text.lstrip().startswith(TRANSCRIPT_MARKER)
+            message.edited = message.edited or (event_type == "message.edited" and not transcript_cleanup)
             if isinstance(text, str):
                 # Like the direction, the latest text in file order wins.
                 message.text_length = len(text.strip())

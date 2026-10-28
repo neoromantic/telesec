@@ -32,15 +32,24 @@ DEFAULT_MODE = _history.TRANSCRIBE_DEFAULT_MODE
 
 CALLBACK_PREFIX = "tb:"
 MAX_CALLBACK_BYTES = 64  # Telegram's callback_data limit.
-ACTIONS = frozenset({"m", "r", "s", "b", "p", "f"})
-NO_ARG_ACTIONS = frozenset({"r", "b", "p"})
-# `tb:f:<chat>:<arg>`: this chat's history (h) or dossier (d) on or off, or erasing its saved history
-# (ask, then do). Args carry the target value, so a stale or double tap is harmless.
+# `t` opens the transcription mode picker; `x:<message id>` shows a deleted message's saved text (deletion alerts).
+ACTIONS = frozenset({"m", "r", "s", "b", "p", "f", "t", "x"})
+NO_ARG_ACTIONS = frozenset({"r", "b", "p", "t"})
+# `tb:f:<chat>:<arg>`: this chat's history (h), dossier (d) or deletion alerts (a) on or off, or erasing its
+# saved history (ask, then do). Args carry the target value, so a stale or double tap is harmless.
 ERASE_ASK = "h.erase"
 ERASE_DO = "h.erase.yes"
 ERASE_ARGS = frozenset({ERASE_ASK, ERASE_DO})
-FLAG_ARGS = frozenset({"h.on", "h.off", "d.on", "d.off", *ERASE_ARGS})
-FLAG_FEATURES = {"h": "history", "d": "dossier"}
+FLAG_ARGS = frozenset({"h.on", "h.off", "d.on", "d.off", "a.on", "a.off", *ERASE_ARGS})
+FLAG_FEATURES = {"h": "history", "d": "dossier", "a": "alerts"}
+# One emoji per feature, the same in Settings and every chat's panel. A switch shows its state with a mark;
+# a feature with more values shows the value and opens a picker.
+ICONS = {"transcription": "🎙️", "history": "🗂️", "retention": "⏳", "dossier": "📇", "dossiers": "📇",
+         "alerts": "🔔"}
+ON_MARK = "✅"
+OFF_MARK = "❌"
+PICKER_MARK = " ›"
+_MESSAGE_ID_RE = re.compile(r"^\d{1,20}\Z")
 
 MAX_TEXT_UNITS = 4096  # Telegram's message text limit, counted in UTF-16 code units.
 MAX_TOAST_CHARS = 200  # Telegram's answerCallbackQuery text limit.
@@ -82,14 +91,17 @@ _STRINGS: dict[str, dict[str, str]] = {
         "mode.own": "own",
         "mode.peer": "peer",
         "mode.off": "off",
+        "mode.help": "both: yours and the contact's · own: only yours · peer: only the contact's · off: none",
         "reset": "Reset to default",
-        "history.on": "Save history",
-        "history.off": "Don't save",
-        "dossier.on": "Keep dossier",
-        "dossier.off": "No dossier",
+        "feature.transcription": "Transcription",
+        "feature.history": "History",
+        "feature.retention": "Keep history",
+        "feature.dossier": "Dossier",
+        "feature.dossiers": "Dossiers",
+        "feature.alerts": "Deletion alerts",
         "history.settings": "History: off in Settings",
         "history.scope": "History: off by the old server scope",
-        "history.unreadable": "Chat settings can't be read; history and dossiers are paused.",
+        "history.unreadable": "Chat settings can't be read; history, dossiers and deletion alerts are paused.",
         "history.erase": "🗑 Erase saved history",
         "erase.messages.one": "{n} saved message",
         "erase.messages.few": "{n} saved messages",
@@ -101,7 +113,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cancel": "Cancel",
         "erase.done": "Saved history erased",
         "erase.none": "No saved history for this chat",
-        "erase.needs_off": "Choose Don't save for this chat first",
+        "erase.needs_off": "Turn 🗂️ History off for this chat first",
         "erase.unreadable": "Chat settings can't be read; try again later",
         "erase.error": "Error: could not erase the saved history",
         "dossier.settings": "Dossier: off in Settings",
@@ -111,8 +123,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history.done.off": "History: off for this chat",
         "dossier.done.on": "Dossier: on for this chat",
         "dossier.done.off": "Dossier: off for this chat",
+        "alerts.settings": "Deletion alerts: off in Settings",
+        "alerts.needs_history": "Deletion alerts: need history",
+        "alerts.done.on": "Deletion alerts: on for this chat",
+        "alerts.done.off": "Deletion alerts: off for this chat",
         "chat_save_error": "Error: could not save the chat setting",
-        "refresh": "Refresh",
+        "refresh": "🔄 Refresh",
         "refreshed": "Refreshed",
         "back": "« Back",
         "section_unavailable": "Section unavailable",
@@ -141,14 +157,17 @@ _STRINGS: dict[str, dict[str, str]] = {
         "mode.own": "мои",
         "mode.peer": "собеседника",
         "mode.off": "выкл",
+        "mode.help": "все — ваши и собеседника · мои — только ваши · собеседника — только его · выкл — никакие",
         "reset": "Сбросить",
-        "history.on": "Сохранять историю",
-        "history.off": "Не сохранять",
-        "dossier.on": "Вести досье",
-        "dossier.off": "Не вести",
+        "feature.transcription": "Расшифровка",
+        "feature.history": "История",
+        "feature.retention": "Хранить историю",
+        "feature.dossier": "Досье",
+        "feature.dossiers": "Досье",
+        "feature.alerts": "Уведомления об удалении",
         "history.settings": "История: выключена в настройках",
         "history.scope": "История: выключена старой настройкой сервера",
-        "history.unreadable": "Настройки чатов не читаются; история и досье на паузе.",
+        "history.unreadable": "Настройки чатов не читаются; история, досье и уведомления об удалении на паузе.",
         "history.erase": "🗑 Стереть сохранённую историю",
         "erase.messages.one": "{n} сохранённое сообщение",
         "erase.messages.few": "{n} сохранённых сообщения",
@@ -160,7 +179,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "cancel": "Отмена",
         "erase.done": "Сохранённая история стёрта",
         "erase.none": "Для этого чата нет сохранённой истории",
-        "erase.needs_off": "Сначала выберите «Не сохранять» для этого чата",
+        "erase.needs_off": "Сначала выключите 🗂️ Историю для этого чата",
         "erase.unreadable": "Настройки чатов не читаются; попробуйте позже",
         "erase.error": "Ошибка: не удалось стереть сохранённую историю",
         "dossier.settings": "Досье: выключено в настройках",
@@ -170,8 +189,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history.done.off": "История: выключена для этого чата",
         "dossier.done.on": "Досье: включено для этого чата",
         "dossier.done.off": "Досье: выключено для этого чата",
+        "alerts.settings": "Уведомления об удалении: выключены в настройках",
+        "alerts.needs_history": "Уведомления об удалении: нужна история",
+        "alerts.done.on": "Уведомления об удалении: включены для этого чата",
+        "alerts.done.off": "Уведомления об удалении: выключены для этого чата",
         "chat_save_error": "Ошибка: не удалось сохранить настройку чата",
-        "refresh": "Обновить",
+        "refresh": "🔄 Обновить",
         "refreshed": "Обновлено",
         "back": "« Назад",
         "section_unavailable": "Раздел недоступен",
@@ -233,6 +256,21 @@ def mode_status(mode: str, *, default: bool, language_code: str | None = None) -
     """ "Transcription: off", or "Transcription: both (default)" for a chat without a stored mode."""
     key = "transcription_default" if default else "transcription"
     return tr(key, language_code, mode=tr(f"mode.{mode}", language_code))
+
+
+def feature_name(feature: str, language_code: str | None = None) -> str:
+    """ "🗂️ History": the feature's emoji and name."""
+    return f"{ICONS[feature]} {tr(f'feature.{feature}', language_code)}"
+
+
+def toggle_label(feature: str, on: bool, language_code: str | None = None) -> str:
+    """ "🗂️ History ✅": one button that shows a switch and flips it."""
+    return f"{feature_name(feature, language_code)} {ON_MARK if on else OFF_MARK}"
+
+
+def picker_label(feature: str, value: str, language_code: str | None = None) -> str:
+    """ "🎙️ Transcription: both ›": one button that shows a value and opens its picker."""
+    return f"{feature_name(feature, language_code)}: {value}{PICKER_MARK}"
 
 
 def parse_settings_command(text: Any) -> bool:
@@ -304,6 +342,8 @@ def parse_callback(data: Any) -> PanelCallback | None:
         return PanelCallback(action, int(chat), arg) if arg in MODES else None
     if action == "f":
         return PanelCallback(action, int(chat), arg) if arg in FLAG_ARGS else None
+    if action == "x":
+        return PanelCallback(action, int(chat), arg) if _MESSAGE_ID_RE.match(arg) else None
     section = _SECTION_ARG_RE.match(arg)
     if section is None:
         return None
@@ -409,36 +449,32 @@ def chat_label_text(chat_id: Any, label: str | None) -> str:
 
 
 # Row states with a status line of their own; any other hidden state shows no line. "scope" (the old scope
-# rule keeps the chat out) shows its line and the history row, as Don't save.
+# rule keeps the chat out) shows its line and the history switch, as off.
 _HISTORY_LINES = frozenset({"settings", "scope", "unreadable"})
 _DOSSIER_LINES = frozenset({"settings", "needs_history"})
-CHAT_DEFAULT_FEATURES = ("on", "on")
+_ALERTS_LINES = frozenset({"settings", "needs_history"})
+CHAT_DEFAULT_FEATURES = ("on", "on", "on")
 
 
 def feature_rows(
-    chat_id: Any, features: tuple[str, str], language_code: str | None = None, *, erasable: bool = False
+    chat_id: Any, features: tuple[str, str, str], language_code: str | None = None, *, erasable: bool = False
 ) -> tuple[list[str], list[list[tuple[str, str]]]]:
-    """This chat's history and dossier controls in the transcription style: (status lines, button rows).
+    """This chat's history, dossier and deletion alert switches: (status lines, button rows).
 
-    ``features`` is (history, dossier) from ``chat_settings.chat_state``: "on" or "off" shows a choice
-    row with "•" on the value in effect, and history "scope" shows it as off with a line; any other state
-    hides the row, and some show a line instead. ``erasable`` (the chat has saved history and history is
-    not on for it) adds "Erase saved history" under the history row or line.
+    ``features`` is (history, dossier, alerts) from ``chat_settings.chat_state`` and ``alerts_state``: "on"
+    or "off" shows one button with the state that sets the other value, and history "scope" shows it as off
+    with a line; any other state hides the button, and some show a line instead. ``erasable`` (the chat has
+    saved history and history is not on for it) adds "Erase saved history" under the history switch or line.
     """
     lines: list[str] = []
     rows: list[list[tuple[str, str]]] = []
     for (key, feature), state, with_line in zip(
-        FLAG_FEATURES.items(), features, (_HISTORY_LINES, _DOSSIER_LINES), strict=True
+        FLAG_FEATURES.items(), features, (_HISTORY_LINES, _DOSSIER_LINES, _ALERTS_LINES), strict=True
     ):
-        shown = "off" if state == "scope" else state
-        if shown in ("on", "off"):
-            rows.append(
-                [
-                    (("• " if value == shown else "") + tr(f"{feature}.{value}", language_code),
-                     callback_data("f", chat_id, f"{key}.{value}"))
-                    for value in ("on", "off")
-                ]
-            )
+        if state in ("on", "off", "scope"):
+            on = state == "on"
+            rows.append([(toggle_label(feature, on, language_code),
+                          callback_data("f", chat_id, f"{key}.{'off' if on else 'on'}"))])
         if state in with_line:
             lines.append(tr(f"{feature}.{state}", language_code))
         if feature == "history" and state != "on" and erasable:
@@ -467,13 +503,13 @@ def render_erase_confirm(ctx: PanelContext, messages: int) -> PanelView:
     return PanelView(text=text, buttons=buttons)
 
 
-def flag_unavailable(feature: str, features: tuple[str, str], language_code: str | None = None) -> str | None:
-    """The toast for a tap on a hidden history or dossier row (a stale button), else None."""
-    history, dossier = features
-    state = history if feature == "history" else dossier
+def flag_unavailable(feature: str, features: tuple[str, str, str], language_code: str | None = None) -> str | None:
+    """The toast for a tap on a hidden switch (a stale button), else None."""
+    history = features[0]
+    state = features[list(FLAG_FEATURES.values()).index(feature)]
     if state in ("on", "off", "scope"):
         return None
-    if feature == "dossier" and state == "no_history":
+    if feature != "history" and state == "no_history":
         state, feature = history, "history"
     if state == "unreadable":
         return tr("chat_save_error", language_code)
@@ -487,14 +523,14 @@ def render_main(
     transcription_enabled: bool,
     *,
     notice: str | None = None,
-    features: tuple[str, str] = CHAT_DEFAULT_FEATURES,
+    features: tuple[str, str, str] = CHAT_DEFAULT_FEATURES,
     erasable: bool = False,
 ) -> PanelView:
-    """The panel's main view: transcription, history and dossier controls, then the sections and Refresh.
+    """The panel's main view: one button per feature, then the sections and Refresh.
 
     ``entry`` is the chat's stored mode entry (None for the default). ``notice``
-    is a one-line status such as a save error, shown under the header.
-    ``features`` is (history, dossier) and ``erasable`` whether the chat has saved history, see ``feature_rows``.
+    is a one-line status such as a save error, shown under the header. ``features`` is
+    (history, dossier, alerts) and ``erasable`` whether the chat has saved history, see ``feature_rows``.
     """
     chat = ctx.chat_id
     lang = ctx.language_code
@@ -504,15 +540,7 @@ def render_main(
     buttons: list[list[tuple[str, str]]] = []
     if transcription_enabled:
         current = entry.mode if entry is not None else DEFAULT_MODE
-        lines.append(mode_status(current, default=entry is None, language_code=lang))
-        buttons.append(
-            [
-                (("• " if mode == current else "") + tr(f"mode.{mode}", lang), callback_data("m", chat, mode))
-                for mode in MODES
-            ]
-        )
-        if entry is not None:
-            buttons.append([(tr("reset", lang), callback_data("r", chat))])
+        buttons.append([(picker_label("transcription", tr(f"mode.{current}", lang), lang), callback_data("t", chat))])
     else:
         lines.append(tr("transcription_disabled", lang))
     feature_lines, feature_buttons = feature_rows(chat, features, lang, erasable=erasable)
@@ -523,6 +551,20 @@ def render_main(
     tail.append((tr("refresh", lang), callback_data("p", chat)))
     buttons += [tail[index : index + 2] for index in range(0, len(tail), 2)]
     return PanelView(text="\n".join(lines), buttons=buttons)
+
+
+def render_mode_picker(ctx: PanelContext, entry: Any) -> PanelView:
+    """The transcription picker: one button per mode, "•" on the one in effect, Reset while a mode is stored."""
+    chat, lang = ctx.chat_id, ctx.language_code
+    current = entry.mode if entry is not None else DEFAULT_MODE
+    status = mode_status(current, default=entry is None, language_code=lang)
+    lines = [f"{tr('title', lang)}: {chat_label_text(chat, ctx.chat_label)}", f"{ICONS['transcription']} {status}",
+             tr("mode.help", lang)]
+    buttons = [[(("• " if mode == current else "") + tr(f"mode.{mode}", lang), callback_data("m", chat, mode))
+                for mode in MODES]]
+    if entry is not None:
+        buttons.append([(tr("reset", lang), callback_data("r", chat))])
+    return with_back(PanelView(text="\n".join(lines), buttons=buttons), chat, lang)
 
 
 def with_back(view: PanelView, chat_id: Any, language_code: str | None = None) -> PanelView:

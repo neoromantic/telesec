@@ -1,6 +1,6 @@
-"""Per-chat history and dossier switches: "Don't save" and "No dossier" for one chat.
+"""Per-chat history, dossier and deletion alert switches for one chat.
 
-The owner panel and ``hermes telesec chat set`` turn history or the dossier off for one chat. The
+The owner panel and ``hermes telesec chat set`` turn history, the dossier or deletion alerts off for one chat. The
 values are stored per (Business owner, chat) like transcription modes, in
 ``$HERMES_HOME/data/telesec/chat-settings.json``; "on" is the default and removes the value. The file
 is separate from ``transcription-modes.json`` because older versions drop unknown keys there on their
@@ -40,7 +40,7 @@ from . import transcription_modes as _modes
 
 logger = logging.getLogger(__name__)
 
-FEATURES = ("history", "dossier")
+FEATURES = ("history", "dossier", "alerts")
 OFF = "off"
 ON = "on"
 UPDATED_VIA = ("chat", "cli")
@@ -51,7 +51,7 @@ CHAT_USAGE = "Usage: hermes telesec chat <list|get|set|scope>"
 REPAIR_HINT = "'hermes telesec chat set <chat> ... --owner ID' backs it up and starts empty"
 LEGACY_SCOPE_KEY = "legacy_scope"
 SCOPE_MIGRATION = "history_scope"
-TURN_ON_HINT = "Manage Bot > Save history in the chat, or 'hermes telesec chat set <chat> --history on'"
+TURN_ON_HINT = "Manage Bot > 🗂 History in the chat, or 'hermes telesec chat set <chat> --history on'"
 SCOPE_CLEAR_COMMAND = "hermes telesec chat scope clear --yes"
 DOWNGRADE_NOTE = ("Telesec 0.13 or older reads only the variables, so keep them set while you may go back to it, "
                   "and remove them after that.")
@@ -72,13 +72,14 @@ def chat_settings_path() -> Path:
 class ChatEntry:
     history: bool = True
     dossier: bool = True
+    alerts: bool = True
     updated_at: str | None = None
     updated_via: str | None = None
     # Features stored as an explicit "on": history the owner turned on over the old scope rule.
     explicit_on: frozenset[str] = frozenset()
 
     def on(self, feature: str) -> bool:
-        return self.history if feature == "history" else self.dossier
+        return getattr(self, feature)
 
 
 @dataclass(frozen=True)
@@ -587,7 +588,7 @@ def _stored_on(snapshot: ChatSnapshot, owner: Any, chat: Any, feature: str) -> b
 
 def _features(feature: str) -> tuple[str, ...]:
     _check_feature(feature)
-    return ("history",) if feature == "history" else FEATURES
+    return ("history",) if feature == "history" else ("history", feature)
 
 
 def may_be_paused(business_connection_id: Any, chat_id: Any, feature: str) -> bool:
@@ -665,6 +666,21 @@ def chat_state(owner: Any, chat: Any, *, chat_type: Any = None, connections: Ite
     return history, "on" if _stored_on(snapshot, owner, chat, "dossier") else "off"
 
 
+def alerts_state(owner: Any, chat: Any, *, history: str, snapshot: ChatSnapshot | None = None) -> str:
+    """Deletion alerts for one owner's chat, as the panel shows them; ``history`` is ``chat_state``'s. Blocking.
+
+    "on" | "off" (this chat) | "settings" (off for all chats) | "needs_history" (this chat's history is off) |
+    "no_history" (history is not on for the chat).
+    """
+    if history not in ("on", "off", "scope"):
+        return "no_history"
+    if not _settings.enabled("alerts"):
+        return "settings"
+    if history != "on":
+        return "needs_history"
+    return "on" if _stored_on(snapshot or default_store().snapshot(), owner, chat, "alerts") else "off"
+
+
 @dataclass(frozen=True)
 class ChatScope:
     """What the CLI knows of each chat for ``chat_state``: its type and connections, from the history
@@ -681,10 +697,12 @@ class ChatScope:
         return seen or tuple(c for c, bound in self.owners.items() if owner is not None and bound == owner)
 
     def state(self, owner: str | None, chat: str, *, connection: str | None = None,
-              snapshot: ChatSnapshot | None = None) -> tuple[str, str]:
+              snapshot: ChatSnapshot | None = None) -> tuple[str, str, str]:
+        """(history, dossier, alerts) in effect for the chat."""
         connections = (connection,) if connection else self.connections(owner, chat)
-        return chat_state(owner, chat, chat_type=self.chat_types.get(chat), connections=connections,
-                          snapshot=snapshot)
+        history, dossier = chat_state(owner, chat, chat_type=self.chat_types.get(chat), connections=connections,
+                                      snapshot=snapshot)
+        return history, dossier, alerts_state(owner, chat, history=history, snapshot=snapshot)
 
 
 def cli_scope() -> ChatScope:
@@ -819,25 +837,26 @@ def clear_scope(store: ChatSettingsStore | None = None, *, now: datetime | None 
 
 
 def add_chat_parser(subs: Any) -> None:
-    chat = subs.add_parser("chat", help="Show or change history and dossier for one chat")
+    chat = subs.add_parser("chat", help="Show or change history, dossier and deletion alerts for one chat")
     chat_subs = chat.add_subparsers(dest="telesec_chat_command")
 
-    list_parser = chat_subs.add_parser("list", help="List chats with history or dossier off")
+    list_parser = chat_subs.add_parser("list", help="List chats with history, dossier or deletion alerts off")
     list_parser.add_argument("--owner")
     list_parser.add_argument("--format", choices=["text", "json"], default="text")
     list_parser.set_defaults(_chat_action="list")
 
-    get_parser = chat_subs.add_parser("get", help="Show history and dossier for one chat")
+    get_parser = chat_subs.add_parser("get", help="Show history, dossier and deletion alerts for one chat")
     get_parser.add_argument("chat")
     get_parser.add_argument("--owner")
     get_parser.add_argument("--connection")
     get_parser.add_argument("--format", choices=["text", "json"], default="text")
     get_parser.set_defaults(_chat_action="get")
 
-    set_parser = chat_subs.add_parser("set", help="Turn history or the dossier on or off for one chat")
+    set_parser = chat_subs.add_parser("set", help="Turn history, the dossier or deletion alerts on or off for one chat")
     set_parser.add_argument("chat")
     set_parser.add_argument("--history", choices=["on", "off"])
     set_parser.add_argument("--dossier", choices=["on", "off"])
+    set_parser.add_argument("--alerts", choices=["on", "off"])
     set_parser.add_argument("--owner")
     set_parser.add_argument("--connection")
     set_parser.set_defaults(_chat_action="set")
@@ -858,7 +877,7 @@ def _entry_json(owner: str | None, chat: str, entry: ChatEntry | None, *, scope:
                 connection: str | None = None, label: str | None = None,
                 snapshot: ChatSnapshot | None = None) -> dict[str, Any]:
     entry_or_default = entry or ChatEntry()
-    history, dossier = scope.state(owner, chat, connection=connection, snapshot=snapshot)
+    history, dossier, alerts = scope.state(owner, chat, connection=connection, snapshot=snapshot)
     return {
         "owner": owner,
         "chat_id": chat,
@@ -866,10 +885,13 @@ def _entry_json(owner: str | None, chat: str, entry: ChatEntry | None, *, scope:
         "label": label,
         "history": _flag(entry_or_default.history),
         "dossier": _flag(entry_or_default.dossier),
+        "alerts": _flag(entry_or_default.alerts),
         "effective_history": "on" if history == "on" else "off",
         "effective_dossier": "on" if dossier == "on" else "off",
+        "effective_alerts": "on" if alerts == "on" else "off",
         "history_state": history,
         "dossier_state": dossier,
+        "alerts_state": alerts,
         "updated_via": entry.updated_via if entry is not None else None,
         "updated_at": entry.updated_at if entry is not None else None,
     }
@@ -913,7 +935,7 @@ def _print_json(document: Any) -> None:
 
 def _entry_text(entry: ChatEntry | None) -> str:
     entry = entry or ChatEntry()
-    return f"history={_flag(entry.history)} dossier={_flag(entry.dossier)}"
+    return f"history={_flag(entry.history)} dossier={_flag(entry.dossier)} alerts={_flag(entry.alerts)}"
 
 
 def _scope_json(snapshot: ChatSnapshot) -> dict[str, Any] | None:
@@ -959,6 +981,7 @@ def _list(args: argparse.Namespace, store: ChatSettingsStore) -> int:
         scope = cli_scope()
         _print_json({"history_enabled": _settings.enabled("history"),
                      "dossiers_enabled": _settings.enabled("dossiers"),
+                     "alerts_enabled": _settings.enabled("alerts"),
                      "old_scope": _scope_json(snapshot),
                      "chats": [_entry_json(o, c, e, scope=scope, snapshot=snapshot) for o, c, e in rows]})
         return 0
@@ -966,7 +989,7 @@ def _list(args: argparse.Namespace, store: ChatSettingsStore) -> int:
     for line in scope_lines:
         print(line)
     if not rows:
-        print("No chat has history or the dossier off; every chat follows Settings"
+        print("No chat has history, the dossier or deletion alerts off; every chat follows Settings"
               + (" and the old history scope." if scope_lines else "."))
     for owner_key, chat, entry in rows:
         print(f"owner={owner_key} chat={chat} {_entry_text(entry)} via={entry.updated_via} "
@@ -1003,9 +1026,9 @@ def _scope_clear_cli(store: ChatSettingsStore, confirmed: bool) -> int:
         ask = "No old history scope rule is stored yet. This makes sure a later start never stores one."
     else:
         done = ("Dropped the stored old history scope rule. Chats it kept out start saving history with their next "
-                "message, except chats set to Don't save; their dossiers resume too.")
+                "message, except chats with history off; their dossiers resume too.")
         ask = (f"This drops the stored old history scope rule ({snapshot.scope.summary()}). Chats it keeps out "
-               f"start saving history with their next message, except chats set to Don't save.")
+               f"start saving history with their next message, except chats with history off.")
     if not confirmed:
         print(f"{ask} Run '{SCOPE_CLEAR_COMMAND}' to do it.")
     else:
@@ -1021,7 +1044,7 @@ _SCOPE_REPAIR_NOTES = {
     "kept": "The old history scope rule was kept from the damaged file.",
     "variables": "The old history scope rule was stored again from the TELESEC_HISTORY_* variables.",
     "lost": ("warning: the old history scope rule was lost with the backup, so the chats it kept out now save "
-             "history. Set them to Don't save, or set the TELESEC_HISTORY_* variables again and restart the "
+             "history. Turn their history off, or set the TELESEC_HISTORY_* variables again and restart the "
              "gateway to store it again."),
 }
 
@@ -1050,10 +1073,10 @@ def handle_chat_cli(args: argparse.Namespace, *, store: ChatSettingsStore | None
                 _print_json({**_entry_json(owner, chat, entry, scope=scope, connection=connection, label=label,
                                            snapshot=snapshot), "old_scope": _scope_json(snapshot)})
                 return 0
-            history, dossier = scope.state(owner, chat, connection=connection, snapshot=snapshot)
+            history, dossier, alerts = scope.state(owner, chat, connection=connection, snapshot=snapshot)
             stored = "" if entry is None else f" (via {entry.updated_via} at {entry.updated_at})"
             print(f"chat={chat} {_entry_text(entry)}{stored}")
-            print(f"in effect: history={history} dossier={dossier}")
+            print(f"in effect: history={history} dossier={dossier} alerts={alerts}")
             if history == "scope":
                 print(f"The old history scope rule keeps this chat out. Turn it on: 'hermes telesec chat set {chat} "
                       f"--history on'. Drop the rule: '{SCOPE_CLEAR_COMMAND}'.")
@@ -1062,7 +1085,7 @@ def handle_chat_cli(args: argparse.Namespace, *, store: ChatSettingsStore | None
             changes = [(feature, getattr(args, feature)) for feature in FEATURES
                        if getattr(args, feature, None) is not None]
             if not changes:
-                raise ValueError("pass --history on|off, --dossier on|off, or both")
+                raise ValueError("pass --history, --dossier or --alerts on|off")
             connections = (connection,) if connection else cli_scope().connections(owner, chat)
             entry = None
             for feature, value in changes:
