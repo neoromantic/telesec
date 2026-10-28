@@ -3092,3 +3092,14 @@ def test_owner_edit_with_microphone_prefix_counts(plugin, cs):
     original["text"], edited["text"] = "🎙️ Meet me at five", "🎙️ Meet me at six"
     stats = cs.compute_stats(_entry(), [original, edited], _window(cs))
     assert stats.edited.sent == 1
+
+
+def test_cleanup_confirmation_does_not_hide_another_owner_edit(plugin, cs):
+    at = _utc(2026, 10, 10, 9, 0)
+    original = _msg(plugin, 1, at, "outbound")
+    cleanup = _msg(plugin, 1, at, "outbound", edited=True, observed=at + timedelta(seconds=1))
+    manual = _msg(plugin, 1, at, "outbound", edited=True, observed=at + timedelta(seconds=2))
+    manual["text"] = "🎙️ Owner's revised words"
+    confirmation = {**cleanup, "event_type": "transcript.cleanup_confirmed", "edited_event_id": cleanup["event_id"]}
+    stats = cs.compute_stats(_entry(), [original, cleanup, manual, confirmation], _window(cs))
+    assert stats.edited.sent == 1

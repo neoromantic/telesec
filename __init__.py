@@ -1817,7 +1817,8 @@ async def _edit_transcript_in_place(*, bot: Any, message: Any, surface: str, tar
             _history_support._TRANSCRIPT_CLEANUPS.pop(key, None)
             return "owner_edited"
         if surface == "reply":
-            _history_support._TRANSCRIPT_CLEANUPS[key] = kwargs["text"]
+            cleanup = {"text": kwargs["text"], "confirmed": False, "record": None}
+            _history_support._TRANSCRIPT_CLEANUPS[key] = cleanup
             while len(_history_support._TRANSCRIPT_CLEANUPS) > 512:
                 _history_support._TRANSCRIPT_CLEANUPS.pop(next(iter(_history_support._TRANSCRIPT_CLEANUPS)))
         try:
@@ -1825,18 +1826,36 @@ async def _edit_transcript_in_place(*, bot: Any, message: Any, surface: str, tar
         except Exception as exc:  # noqa: BLE001 - a failed edit leaves the raw text, never a second transcript
             outcome = _classify_caption_edit_exception(exc)
             if outcome is CaptionEditAttemptOutcome.APPLIED:
-                return "edited"
-            if outcome is CaptionEditAttemptOutcome.UNSUPPORTED_ENTITY and index == 0:
+                result = True
+            elif outcome is CaptionEditAttemptOutcome.UNSUPPORTED_ENTITY and index == 0:
                 continue
-            _history_support._TRANSCRIPT_CLEANUPS.pop(key, None)
-            logger.info("%s: cleaned transcript edit failed; the raw text stays (%s)", _PLUGIN_NAME,
-                        type(exc).__name__)
-            return "edit_failed"
+            else:
+                _history_support._TRANSCRIPT_CLEANUPS.pop(key, None)
+                logger.info("%s: cleaned transcript edit failed; the raw text stays (%s)", _PLUGIN_NAME,
+                            type(exc).__name__)
+                return "edit_failed"
         if result is False:
             _history_support._TRANSCRIPT_CLEANUPS.pop(key, None)
             return "edit_failed"
-        return "edited"
-    return "edit_failed"
+        break
+    if surface == "reply":
+        with _history_support._CACHE_LOCK:
+            cleanup["confirmed"] = True
+            record = cleanup["record"]
+        if record is not None:
+            chat_dir = _history_support._history_chat_dir_path(key[0], key[1])
+
+            def confirm(state: Any, appended: list[dict[str, Any]]) -> None:
+                confirmation = {**record, "event_type": "transcript.cleanup_confirmed",
+                                "edit_origin": "transcript_cleanup", "edited_event_id": record["event_id"]}
+                confirmation["event_id"] = _history_support._event_id(confirmation)
+                _history_support._append_record_to_state(chat_dir, state, confirmation, appended_records=appended)
+
+            await asyncio.to_thread(_history_support._mutate_chat_history_transactionally, chat_dir,
+                                    dirty_reason="transcript_cleanup_refresh_failed", mutate=confirm,
+                                    existing_only=True)
+            _history_support._TRANSCRIPT_CLEANUPS.pop(key, None)
+    return "edited"
 
 
 async def _publish_transcript(

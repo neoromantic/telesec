@@ -91,8 +91,8 @@ _OWNER_CACHE: dict[str, str] = {}
 _CACHE_LOCK = threading.RLock()
 _CHAT_STATE_CACHE: dict[str, ChatStateCacheEntry] = {}
 _DELETION_TIMERS: dict[tuple[str, str], DeletionTimerEntry] = {}
-# Exact cleanup writes awaiting their Telegram echo; provenance is saved on that history event.
-_TRANSCRIPT_CLEANUPS: dict[tuple[str, str, str], str] = {}
+# Cleanup attempts awaiting an API result or echo. Early edits stay ordinary history until success.
+_TRANSCRIPT_CLEANUPS: dict[tuple[str, str, str], dict[str, Any]] = {}
 # Called with each pending deletion alert and the deleted message as history saved it (None when it
 # was not saved). It runs under the chat's writer lock, so it must only hand the work off. The gateway sets
 # it for deletion alerts.
@@ -3135,9 +3135,6 @@ async def _capture_update(update: Any, *, bot: Any, current: datetime, direction
         chat_profile = _extract_chat_profile(payload)
         sender_profile = _extract_sender_profile(payload)
         cleanup_key = (str(business_connection_id), str(chat_id), str(_get(payload, "message_id")))
-        automatic_edit = event_type == "message.edited" and _TRANSCRIPT_CLEANUPS.get(cleanup_key) == text
-        if automatic_edit:
-            _TRANSCRIPT_CLEANUPS.pop(cleanup_key)
 
         def _mutate_message(state: ChatState, appended_records: list[dict[str, Any]]) -> bool:
             if command_edit and str(_get(payload, "message_id")) not in state.messages:
@@ -3158,9 +3155,17 @@ async def _capture_update(update: Any, *, bot: Any, current: datetime, direction
                 chat_profile=chat_profile,
                 sender_profile=sender_profile,
             )
-            if automatic_edit:
-                record["edit_origin"] = "transcript_cleanup"
-            wrote_record = _append_record_to_state(chat_dir, state, record, appended_records=appended_records)
+            with _CACHE_LOCK:
+                cleanup = _TRANSCRIPT_CLEANUPS.get(cleanup_key)
+                matching = event_type == "message.edited" and cleanup is not None and cleanup["text"] == text
+                if matching and cleanup["confirmed"]:
+                    record["edit_origin"] = "transcript_cleanup"
+                wrote_record = _append_record_to_state(chat_dir, state, record, appended_records=appended_records)
+                if matching:
+                    if cleanup["confirmed"]:
+                        _TRANSCRIPT_CLEANUPS.pop(cleanup_key)
+                    else:
+                        cleanup["record"] = record
             wrote_classifications = _sync_pending_deletions_for_chat(
                 chat_dir,
                 state,

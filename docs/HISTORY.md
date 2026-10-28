@@ -111,7 +111,7 @@ Rules:
 hermes telesec history deletions --status unexplained --limit 20
 ```
 
-Edits append the full updated text. An observed edit matching an automatic transcript cleanup carries `edit_origin: transcript_cleanup`; stats exclude that edit while counting manual revisions, including those starting with 🎙️. Deletions append a tombstone while preserving earlier text. After the correction window, a deterministic classification is appended:
+Edits append the full updated text. An echo observed after successful cleanup carries `edit_origin: transcript_cleanup`. An edit received before the API response stays an ordinary history event; only success appends `transcript.cleanup_confirmed` referencing its `edited_event_id`. A rejected cleanup cannot change its attribution. Stats exclude confirmed automatic edits while counting manual revisions, including those starting with 🎙️. Deletions append a tombstone while preserving earlier text. After the correction window, a deterministic classification is appended:
 
 | Classification | Meaning |
 |---|---|

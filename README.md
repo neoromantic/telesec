@@ -251,6 +251,8 @@ Alerts speak Russian after you use the bot with a Russian Telegram app (`🔔 У
 
 ## Correspondence stats
 
+Automatic transcript cleanup is excluded from sent edits only after Telegram confirms success. A rejected cleanup request cannot hide your manual revision.
+
 `stats` counts, per contact, text messages received and sent, active days, conversation sessions, latest activity, and deletions over retained history. It also measures the conversation: each side's share, turns, reply times (median and p90), who is waiting for a reply, message length, edits, busy hours and weekdays, activity over time, streaks, the longest silence, and a comparison with the previous period:
 
 ```bash
