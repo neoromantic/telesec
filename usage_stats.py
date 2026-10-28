@@ -22,6 +22,7 @@ import html
 import json
 import logging
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -206,11 +207,6 @@ def panel_action(action: str, arg: str | None, section: str | None, sub: str | N
         feature("panel chat switch")
     elif action == "s" and sub is None and section in _PANEL_SECTIONS:
         feature(_PANEL_SECTIONS[section])
-
-
-def flush(timeout: float = 0.5) -> None:
-    if _client is not None:
-        _client.flush(timeout)
 
 
 # --- Settings in Telegram ------------------------------------------------------------------------
@@ -442,6 +438,14 @@ def handle_cli(args: argparse.Namespace) -> int:
         lines += ["", notice]
     lines += ["", _footer()]
     print("\n".join(lines))
-    if notice:
-        client_.mark_notice_seen()  # shown in full in the terminal
+    if notice and (_reads_stdout() or client_.agent):
+        client_.mark_notice_seen()  # shown in full to a person in a terminal or to an AI agent
     return 0
+
+
+def _reads_stdout() -> bool:
+    """Whether stdout is a terminal: a script, pipe, or ssh without a terminal has not shown anyone the notice."""
+    try:
+        return bool(sys.stdout.isatty())
+    except Exception:  # noqa: BLE001 - a closed or replaced stdout
+        return False

@@ -3112,13 +3112,12 @@ def _handle_cli(args: Any) -> int:
     if command == "telemetry":
         return _usage_stats.handle_cli(args)
     _usage_stats.before_cli(args)
+    # No flush here: setup() registered one at exit, so the command waits at most 0.5 s once, not twice.
     try:
         return _dispatch_cli(args, command)
     except Exception as exc:
         _usage_stats.error(f"cli.{type(exc).__name__}")
         raise
-    finally:
-        _usage_stats.flush()
 
 
 def _dispatch_cli(args: Any, command: str | None) -> int:

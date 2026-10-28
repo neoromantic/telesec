@@ -353,7 +353,15 @@ def test_another_owner_cannot_switch_usage_stats(usage, gs, plugin):
 # --- CLI ------------------------------------------------------------------------------------------
 
 
-def test_cli_status_shows_the_notice_once_and_marks_it_seen(usage, plugin):
+def test_cli_status_in_a_pipe_shows_the_notice_but_keeps_it_due(usage, plugin):
+    exit_code, output = ttm.run_cli(plugin, "telemetry")  # stdout is no terminal and no agent runs it
+
+    assert exit_code == 0 and "telesec shares usage stats with its author" in output
+    assert usage.state() == {} and usage.client.notice_text() is not None
+
+
+def test_cli_status_shows_the_notice_once_and_marks_it_seen(usage, plugin, monkeypatch):
+    monkeypatch.setattr(usage.client, "agent", "codex")  # an AI agent reads the output
     exit_code, output = ttm.run_cli(plugin, "telemetry")
 
     assert exit_code == 0
