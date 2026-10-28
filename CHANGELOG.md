@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Privacy change:** Telesec now sends anonymous usage stats to its author, on by default. Nothing is sent until the owner has seen the notice, which the gateway sends once to the owner's private chat with the bot, with a **Turn off usage stats** button, at the next Business message or panel open; that gateway run sends nothing. The stats are `app_installed`, `app_started`, `feature_used` with a name from a fixed list (handlers such as `voice transcribed`, `history capture`, `dossier update`, `owner panel`, and `hermes telesec` subcommands), and `error_occurred` with an error type or code only, at most once a day each, with the version, OS, architecture, Python version, and a random install ID. Never message text, transcripts, names, chat, user, or connection IDs, paths, settings values, or error text. They go over HTTPS to `https://usage.sergeybaus.com`, which passes them to PostHog. Turn them off with **Don't share** in Settings (`/telesec`), `hermes telesec telemetry off`, `TELESEC_TELEMETRY=0`, or `DO_NOT_TRACK=1`; they are also off in CI and test runs. `hermes telesec telemetry status` shows the state, the reason, and the install ID. The "No telemetry" promise in the README and `SECURITY.md` is replaced by a [Usage stats](README.md#usage-stats) section. Details: https://usage.sergeybaus.com.
+
 ## 0.16.1 - 2026-10-21
 
 - Stats read the Hermes time zone through the public config (`HERMES_TIMEZONE`, then `timezone` in `config.yaml`) instead of the undocumented `hermes_time` module. The result is the same.

@@ -86,6 +86,7 @@ from . import owner_panel as _owner_panel
 from . import settings_panel as _settings_panel
 from . import stats_panel as _stats_panel
 from . import transcription_modes as _transcription_modes
+from . import usage_stats as _usage_stats
 from .migration import migrate
 
 logger = logging.getLogger(__name__)
@@ -433,6 +434,7 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
             _note_business_update_chat(update)
         except Exception as exc:  # noqa: BLE001 - bookkeeping must not break dispatch
             logger.debug("%s: business chat note failed (%s)", _PLUGIN_NAME, type(exc).__name__)
+        _usage_stats.offer_notice(context.bot, _usage_stats.update_connection(update))
         # Any new message from the contact, text or not, opens Telegram's 24-hour window for `/dossier`.
         try:
             _dossier_panel.note_inbound_update(update)
@@ -444,6 +446,7 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
             if await _dossier_panel.handle_dossier_command_update(
                 update, bot=context.bot, adapter=adapter, mark_seen=_mark_identity_seen
             ):
+                _usage_stats.feature("dossier post")
                 raise ApplicationHandlerStop
         except ApplicationHandlerStop:
             raise
@@ -451,6 +454,7 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
             logger.warning("%s: dossier command handling failed (%s)", _PLUGIN_NAME, type(exc).__name__)
         try:
             if await _handle_stats_command_update(update, bot=context.bot, adapter=adapter):
+                _usage_stats.feature("stats command")
                 raise ApplicationHandlerStop
         except ApplicationHandlerStop:
             raise
@@ -462,7 +466,8 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
             # deletion): never history, transcription, or core.
             raise ApplicationHandlerStop
         try:
-            await _history_support.observe_ptb_update(history_update, bot=context.bot)
+            if await _history_support.observe_ptb_update(history_update, bot=context.bot):
+                _usage_stats.feature("history capture")
         except Exception as exc:
             logger.warning("%s: business history observation failed: %s", _PLUGIN_NAME, exc, exc_info=True)
         message = update.effective_message
@@ -522,6 +527,7 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
         BusinessConnectionHandler(on_business_connection_update, block=True), group=_RAW_HISTORY_HANDLER_GROUP
     )
     _dossier_support.ensure_worker_started()
+    _usage_stats.started()
 
 
 def _get(obj: Any, name: str, default: Any = None) -> Any:
@@ -1574,6 +1580,7 @@ async def _cleanup_transcript(
         )
     except Exception as exc:  # noqa: BLE001 - cleanup failure should not drop transcript
         logger.warning("%s: LLM cleanup failed; posting raw transcript: %s", _PLUGIN_NAME, exc)
+        _usage_stats.error(f"cleanup.{type(exc).__name__}")
         return transcript
 
     rejection_reasons = _cleanup_rejection_reasons(transcript, cleaned_text)
@@ -1617,6 +1624,7 @@ async def _cleanup_transcript(
             _PLUGIN_NAME,
             exc,
         )
+        _usage_stats.error(f"cleanup.{type(exc).__name__}")
         return transcript
 
     retry_reasons = _cleanup_rejection_reasons(transcript, retry_text)
@@ -1826,6 +1834,7 @@ async def _process_business_audio_file(
                 full_stt_path = normalized_path
             full_result = await asyncio.to_thread(transcriber, str(full_stt_path))
             if not isinstance(full_result, dict) or not full_result.get("success"):
+                _usage_stats.error("stt.failed")
                 return
             transcript = str(full_result.get("transcript") or "").strip()
             if not transcript:
@@ -1850,8 +1859,10 @@ async def _process_business_audio_file(
             final_text != transcript,
             caption_outcome.value,
         )
+        _usage_stats.transcribed(media_label, cleaned=final_text != transcript)
     except Exception as exc:
         logger.warning("%s: business attached-audio handling failed: %s", _PLUGIN_NAME, exc, exc_info=True)
+        _usage_stats.error(f"audio.{type(exc).__name__}")
     finally:
         for transient_path in (probe_path, normalized_path, path):
             try:
@@ -1905,6 +1916,7 @@ async def _process_business_voice_event(
         if not isinstance(result, dict) or not result.get("success"):
             error = result.get("error", "unknown STT error") if isinstance(result, dict) else "invalid STT result"
             logger.warning("%s: transcription failed for %s: %s", _PLUGIN_NAME, path, error)
+            _usage_stats.error("stt.failed")
             await _send_error_if_enabled(bot=bot, adapter=adapter, message=message, error=str(error))
             return
 
@@ -1932,8 +1944,10 @@ async def _process_business_voice_event(
             final_text != transcript,
             caption_outcome.value,
         )
+        _usage_stats.transcribed(media_label, cleaned=final_text != transcript)
     except Exception as exc:
         logger.warning("%s: business voice handling failed: %s", _PLUGIN_NAME, exc, exc_info=True)
+        _usage_stats.error(f"voice.{type(exc).__name__}")
         await _send_error_if_enabled(bot=bot, adapter=adapter, message=message, error=str(exc))
     finally:
         # Audio is transient processing data. Never retain a newly downloaded
@@ -2411,6 +2425,9 @@ async def _handle_owner_panel_update(update: Any, *, bot: Any) -> bool:
         )
         await bot.send_message(chat_id=private_chat_id, **_panel_message_kwargs(view))
         _log_panel("open", chat_id, state.entry.mode if state.entry is not None else None)
+        _usage_stats.feature("owner panel")
+        _usage_stats.offer_notice(bot, state.ctx.business_connection_id or next(iter(owner.connections), None),
+                                  owner_id=sender_id, language_code=language_code, interactive=True)
     except Exception as exc:  # noqa: BLE001 - a verified owner's `/start bizChat` never reaches core
         logger.warning("%s: owner panel open failed (%s)", _PLUGIN_NAME, type(exc).__name__)
     return True
@@ -2441,6 +2458,9 @@ async def _open_settings(bot: Any, sender_id: str, private_chat_id: Any, languag
             chat_id=private_chat_id, text=_owner_panel.clip_text(view.text), reply_markup=_panel_markup(view)
         )
         _log_panel(f"s:{_owner_panel.SETTINGS_SECTION}", _owner_panel.HOME_CHAT)
+        _usage_stats.feature("settings")
+        _usage_stats.offer_notice(bot, next(iter(owner.connections), None), owner_id=sender_id,
+                                  language_code=language_code, interactive=True)
     except Exception as exc:  # noqa: BLE001 - a verified owner's `/telesec` never reaches core
         logger.warning("%s: settings open failed (%s)", _PLUGIN_NAME, type(exc).__name__)
     return True
@@ -2697,6 +2717,7 @@ async def _handle_owner_panel_callback(query: Any, *, bot: Any) -> None:
         )
     action_name = f"{parsed.action}:{parsed.arg}" if parsed.action in ("s", "f") else parsed.action
     _log_panel(action_name, chat_id, entry.mode if entry is not None else None)
+    _usage_stats.panel_action(parsed.action, parsed.arg, parsed.section, parsed.sub)
     await _edit_panel_message(bot, query, view, fallback)
 
 
@@ -2716,6 +2737,7 @@ async def _handle_settings_home_callback(
     view = await _render_panel_section(section, _settings_context(owner, sender_id, parsed.sub, language_code),
                                        back=False)
     _log_panel(f"s:{parsed.arg}", parsed.chat_id)
+    _usage_stats.panel_action(parsed.action, parsed.arg, parsed.section, parsed.sub)
     await _edit_panel_message(bot, query, view)
 
 
@@ -3080,12 +3102,25 @@ def _setup_cli(subparser: Any) -> None:
     _transcription_modes.add_mode_parser(subs)
     _global_settings.add_settings_parser(subs)
     _chat_settings.add_chat_parser(subs)
+    _usage_stats.add_parser(subs)
 
 
 def _handle_cli(args: Any) -> int:
     if getattr(args, "_telesec_cli", "telesec") == "telegram-business":
         logger.warning("hermes telegram-business is deprecated; use hermes telesec")
     command = getattr(args, "telesec_command", None)
+    if command == "telemetry":
+        return _usage_stats.handle_cli(args)
+    _usage_stats.before_cli(args)
+    # No flush here: setup() registered one at exit, so the command waits at most 0.5 s once, not twice.
+    try:
+        return _dispatch_cli(args, command)
+    except Exception as exc:
+        _usage_stats.error(f"cli.{type(exc).__name__}")
+        raise
+
+
+def _dispatch_cli(args: Any, command: str | None) -> int:
     if getattr(args, "_mode_action", None) or command == "mode":
         return _transcription_modes.handle_mode_cli(args)
     if command == "settings":
@@ -3093,7 +3128,7 @@ def _handle_cli(args: Any) -> int:
     if command == "chat":
         return _chat_settings.handle_chat_cli(args)
     if command is None:
-        print("Usage: hermes telesec <settings|chat|history|stats|dossier|mode> ...")
+        print("Usage: hermes telesec <settings|chat|history|stats|dossier|mode|telemetry> ...")
         return 1
     return _history_support.handle_cli(args)
 
@@ -3302,6 +3337,7 @@ def _settings_command_fallback(raw_args: str = "") -> str:
 def register(ctx: Any) -> None:
     global _llm_facade, _deprecated_env_warned
     migrate(get_hermes_home())
+    _usage_stats.setup()
     _history_support.get_config = ctx.get_config
     deprecated = []
     for name, value in list(os.environ.items()):

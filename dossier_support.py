@@ -31,6 +31,7 @@ from . import dossier_doc as _doc
 from . import dossier_migrate, model_client
 from . import dossier_writer as _writer
 from . import history_support as _history
+from . import usage_stats as _usage_stats
 
 try:
     import fcntl
@@ -1959,6 +1960,7 @@ def run_cycle(*, llm: Any, now: datetime | None = None, trigger: str = "worker",
         state["recent_calls"] = limiter.snapshot()
         state["last_cycle"] = rep.as_state()
         save_state(state)
+        _usage_stats.dossier_cycle(rep)
         return rep
 
 

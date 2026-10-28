@@ -77,4 +77,5 @@ Telesec — Telegram Business secretary for Hermes: voice transcription, corresp
 ### Code
 
 - Python 3.11+ with uv: `uv sync`, then `uv run pytest -q` and `uv run ruff check .` (CI runs both on 3.11–3.14). `.github/workflows/ci.yml` is a hand-edited devkit stub with that version matrix, so devkit sync leaves it alone. Keep the handler group and claim behaviour described in the README.
+- Usage stats: `telemetry.py` is the devkit-managed client ([standard](https://github.com/neoromantic/devkit/blob/main/docs/standards/telemetry.md)); never edit it here. The wiring is `usage_stats.py`: feature names come from its fixed lists, and errors pass a type or code only, never text that can quote chat content. Tests keep it off unless they patch the client's CI and test checks.
 - GitHub issues, PRs, and docs are in simple English.
