@@ -43,9 +43,9 @@ Voice cleanup: gemini / gemini-3.8-flash
 [• Share usage stats] [Don't share]
 ```
 
-Each feature is one button with its emoji and state: tap ✅ to turn it off, ❌ to turn it on. The screenshot below is historical (0.16); the current controls are shown above. Updated Telegram captures are required before release.
+Each feature is one button with its emoji and state: tap ✅ to turn it off, ❌ to turn it on.
 
-![Real Telegram screenshot of the 0.16 Settings in the owner's private chat with the bot: "Telesec settings · all chats", Keep history: forever, the dossier and voice cleanup models, then the Transcribe / Don't transcribe, Save history / Don't save, Forever / 1 year / 90 days / 30 days, and Keep dossiers / No dossiers rows, with transcription, history, and dossiers on and history kept forever.](docs/images/settings.png)
+![Real Telegram screenshot of Settings in the owner's private chat with the bot over made-up data: "Telesec settings · all chats", Usage stats: on, the dossier and voice cleanup models, then 🎙️ Transcription ✅, 🗂️ History ✅, ⏳ Keep history: forever ›, 📇 Dossiers ❌, 🔔 Deletion alerts ✅, and • Share usage stats / Don't share.](docs/images/settings.png)
 
 Or from the terminal:
 
@@ -62,7 +62,7 @@ A change applies to the next update; no restart is needed. To turn history, the 
 
 **⏳ Keep history: forever ›** shows how long saved history is kept and opens a picker: **Forever · 1 year · 90 days · 30 days**, and **‹ Settings** to go back. A shorter time asks first; a longer one applies at once. History is deleted a whole month at a time: once all of a month is older than the chosen time, the next cleanup deletes it, so the current month always stays. Cleanup runs when the gateway starts, when a `hermes` command loads Telesec (such as `hermes telesec settings`), and at most hourly while Business messages arrive. The button stays while history is off, because cleanup keeps running. In the terminal, `hermes telesec settings set retention N` sets any number of days, and the picker shows such a value as its own button (for example `• 45 days`) until you pick another. See [retention and removal](docs/HISTORY.md#retention-and-removal).
 
-The `Usage stats:` line and the **Share usage stats · Don't share** row switch [usage stats](#usage-stats) for this gateway; the screenshot above predates them. While `TELESEC_TELEMETRY` or `DO_NOT_TRACK` in the gateway's environment decides, the line names the variable and the row is not shown.
+The `Usage stats:` line and the **Share usage stats · Don't share** row switch [usage stats](#usage-stats) for this gateway. While `TELESEC_TELEMETRY` or `DO_NOT_TRACK` in the gateway's environment decides, the line names the variable and the row is not shown.
 
 The last lines show the model that writes dossiers (`your main model` when its task follows the main model) and the model that cleans up voice transcripts (or `off`), as configured. They are read-only: choose the dossier model with `hermes model` → Telesec dossiers ([dossier model](#dossier-model)) and the cleanup model in the [configuration](#configuration). A warning line follows the dossier model when its `extra_body` still has the gateway-only `providerOptions` on another provider.
 
@@ -118,9 +118,7 @@ both: yours and the contact's · own: only yours · peer: only the contact's · 
 [« Back]
 ```
 
-The screenshot below is historical (0.16); the current controls are described above. Updated Telegram captures are required before release.
-
-![Real Telegram screenshot of the 0.16 owner panel in the owner's private chat with the bot: Transcription: off, with mode buttons, Reset to default, the Save history / Don't save and Keep dossier / No dossier rows (both on), Stats, Dossier, ⚙️ Settings, and Refresh. The contact's name, username, and chat ID are blurred.](docs/images/owner-panel.png)
+![Real Telegram screenshot of the owner panel in the owner's private chat with the bot for a made-up contact, Casey Demo: 🎙️ Transcription: both ›, 🗂️ History ✅, 📇 Dossier ❌, 🔔 Deletion alerts ✅, 📊 Stats, 📖 Open dossier, ⚙️ Settings, and 🔄 Refresh.](docs/images/owner-panel.png)
 
 Tap a mode to set it, or Reset to return to the default; the panel message goes back to the main view with the new mode. The history, dossier, and deletion alert buttons below it switch those for this chat ([per-chat history and dossier](#per-chat-history-and-dossier)). The header always ends with `chat <id>`, so when you reply to a panel message to ask the agent about that chat, the reply names the chat. The panel speaks Russian when your Telegram app is set to Russian (`Панель владельца`, `🎙️ Расшифровка: выкл ›`, mode buttons `все`, `мои`, `собеседника`, `выкл`) and English otherwise; modes are still stored as `both`, `own`, `peer`, and `off`. Only you see the panel: it lives in your private chat with the bot and the contact sees nothing. Only a verified owner gets the panel. Anyone else's `/start bizChat…` is treated as an ordinary message, and a panel button pressed by anyone else gets a short "Not allowed" alert.
 
@@ -169,7 +167,7 @@ The same owner panel turns history, the dossier, and deletion alerts on or off f
 - **🔔 Deletion alerts ❌** stops [deletion alerts](#deletion-alerts) for this chat; history and the dossier go on.
 - **🗑 Erase saved history** shows under the history button, or under the `History: off in Settings` line, when history holds messages from the chat and the chat saves nothing now: its history is off, the [old server scope](#moving-from-the-history-environment-variables) keeps it out, or history is off in Settings. It asks first, in the same message: `Erase 12 saved messages from this chat? Its dossier is deleted too. This cannot be undone.` **Erase** stops a running dossier refresh, deletes every saved message of this chat on your Business connection and the chat's entry in the contact list, and then its dossier. Stats then show no history for the chat, and the chat keeps its setting. Erased history does not come back by itself: to bring it back, turn the chat's history on (**🗂️ History ❌**) and run [`history import`](docs/HISTORY.md#import-past-messages) again. The button refuses while the chat saves history (`Turn 🗂️ History off for this chat first`) or while chat settings can't be read (`Chat settings can't be read; try again later`), so an old or repeated tap erases nothing. It never touches another owner's chat with the same contact.
 
-![Real Telegram screenshot of the 0.16 owner panel for a chat with history off: Transcription: off, Dossier: needs history, the mode buttons, Reset to default, Save history / • Don't save, 🗑 Erase saved history, Stats, Dossier, ⚙️ Settings, and Refresh. The contact's name, username, and chat ID are blurred.](docs/images/owner-panel-erase.png)
+![Real Telegram screenshot of the owner panel for a made-up contact whose chat saves nothing: 🎙️ Transcription: both ›, 🗂️ History ❌, 🗑 Erase saved history, 📊 Stats, 📖 Open dossier, ⚙️ Settings, and 🔄 Refresh.](docs/images/owner-panel-erase.png)
 
 In Russian the buttons read «🗂️ История», «📇 Досье», «🔔 Уведомления об удалении», and «🗑 Стереть сохранённую историю». A button that cannot apply is hidden, and a short line says why: `History: off in Settings` (history is off for all chats), `Dossier: off in Settings`, `Dossier: needs history` (this chat saves no history), `Deletion alerts: off in Settings`, or `Deletion alerts: need history`. A chat the [old server scope](#moving-from-the-history-environment-variables) keeps out shows **🗂️ History ❌** and the line `History: off by the old server scope` («История: выключена старой настройкой сервера»); a tap turns it on. A group chat has no dossier button, since dossiers cover private chats only. On is the default for history, the dossier, and deletion alerts and is not stored (except history turned on over the old server scope), so turning one on clears the setting. Older panel messages keep working: their buttons still set what they say, and the message then shows the new layout.
 
