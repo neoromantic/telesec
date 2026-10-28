@@ -72,7 +72,7 @@ hermes telesec dossier note --persona --append "I never use emoji with clients."
 - To add a correction, use `--append`: it adds a new paragraph and keeps the rest of the note. `--text` replaces the whole note; use it only when the owner asks to replace the note. The owner types at most 500 characters at a time; an appended note may grow longer and is never cut.
 - `--text` refuses (exit 1, nothing changed) when the note came from the old dossier or is over 500 characters. Add `--replace` only when the owner confirms that the whole note should go. After `--replace` or `--clear` the note is the owner's own text again.
 - The model treats the note as true and follows it, including requests to leave something out, but does not copy it into the document.
-- The note works before the first build. The next cycle rewrites the dossier with it; `run` does it now. While dossiers or history are off, or the chat is set to No dossier or Don't save, `note` says the note is used once that is back on.
+- The note works before the first build. The next cycle rewrites the dossier with it; `run` does it now. While dossiers or history are off, or the chat's dossier or history is off, `note` says the note is used once that is back on.
 - The note's text is never posted: `/dossier` posts the document text only. The model uses the note to write the document, so a fact from the note can reach the contact through it.
 
 ## Run And Forget
@@ -128,14 +128,14 @@ hermes telesec dossier clairic off
 
 ## One Chat
 
-The owner can leave one chat out of dossiers with **No dossier** in that chat's owner panel, or **Don't save** to stop its history too. Check a chat before you explain a missing or old dossier:
+The owner can leave one chat out of dossiers with the **📇 Dossier** switch in that chat's owner panel, or the **🗂️ History** switch to stop its history too. Check a chat before you explain a missing or old dossier:
 
 ```bash
 hermes telesec chat get 991 --format json   # effective_dossier, dossier_state
 hermes telesec chat list --format json
 ```
 
-- `effective_dossier` is `on` or `off`. `dossier_state` says why: `off` (No dossier for this chat), `needs_history` (Don't save for this chat, or the old server scope keeps it out), `settings` (dossiers off for all chats), `no_history` (history is off for all chats, or chat settings can't be read), `private_only`, or `on`.
+- `effective_dossier` is `on` or `off`. `dossier_state` says why: `off` (the dossier is off for this chat), `needs_history` (history is off for this chat, or the old server scope keeps it out), `settings` (dossiers off for all chats), `no_history` (history is off for all chats, or chat settings can't be read), `private_only`, or `on`.
 - A paused chat keeps its stored dossier frozen: `show` still works, but `run --contact` and `preview` refuse with "Dossier is off for this chat.", `/dossier` posts nothing, and the persona leaves its messages out.
 - **🗑 Erase saved history** in the owner panel and `hermes telesec history forget` delete a chat's history and then its dossier. A dossier missing after that was erased on purpose; it comes back only if the chat saves history again.
 - Only when the owner asks: `hermes telesec chat set 991 --dossier off` or `--dossier on`. Turning it on sends that chat's text to the model again.

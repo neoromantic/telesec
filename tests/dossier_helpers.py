@@ -681,5 +681,5 @@ class FakeApp:
 def connect_gateway(plugin: ModuleType, app: FakeApp | None = None) -> FakeApp:
     """Run the plugin's Telegram handler factory the way ``TelegramAdapter.connect()`` does."""
     app = app or FakeApp()
-    plugin._register_telegram_handlers(app, SimpleNamespace(platform="telegram"))
+    plugin._register_telegram_handlers(app, SimpleNamespace(platform="telegram", _bot=FakeBot()))
     return app

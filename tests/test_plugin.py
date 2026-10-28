@@ -132,6 +132,8 @@ class FakeBot:
         self.edit_result = True
         self.expandable_entities_unsupported = False
         self.send_error: Exception | None = None
+        self.text_edit_calls: list[dict] = []
+        self.text_edit_error: Exception | None = None
 
     async def send_message(self, **kwargs):
         self.calls.append(kwargs)
@@ -140,6 +142,15 @@ class FakeBot:
         if self.send_error is not None:
             raise self.send_error
         self.delivered_calls.append(kwargs)
+        return SimpleNamespace(message_id=499 + len(self.delivered_calls))
+
+    async def edit_message_text(self, **kwargs):
+        self.text_edit_calls.append(kwargs)
+        if self.expandable_entities_unsupported and _has_expandable_entity(kwargs.get("entities", ())):
+            raise RuntimeError("unsupported message entity type: expandable_blockquote")
+        if self.text_edit_error is not None:
+            raise self.text_edit_error
+        return True
 
     async def get_business_connection(self, business_connection_id: str):
         self.business_connection_calls.append(business_connection_id)
@@ -254,7 +265,7 @@ def test_manifest_uses_current_fields():
     assert {key: value for key, value in manifest.items() if key != "config_schema"} == {
         "manifest_version": 2,
         "name": PLUGIN_ID,
-        "version": "0.16.1",
+        "version": "0.17.0",
         "description": (
             "Telesec — Telegram Business secretary for Hermes."
         ),
@@ -285,7 +296,7 @@ def test_package_metadata_uses_public_product_identity():
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
     assert metadata["name"] == "telesec"
-    assert metadata["version"] == "0.16.1"
+    assert metadata["version"] == "0.17.0"
     assert metadata["description"] == (
         "Telesec — Telegram Business secretary for Hermes."
     )
@@ -2165,3 +2176,248 @@ def test_shipped_files_pass_the_hermes_injection_scan():
             if any(pattern.search(line) for pattern in patterns):
                 hits.append(f"{relative}:{number}")
     assert hits == []
+
+
+# --- Raw transcript first, cleanup in place (#8) ---------------------------------------------------------
+
+RAW_FIRST_RAW = (
+    "слушай я короче думаю что наверное сначала надо это проверить потому что там есть "
+    "несколько странных деталей и я не хочу чтобы они куда-то пропали"
+)
+RAW_FIRST_CLEAN = (
+    "Слушай, я, короче, думаю, что, наверное, сначала надо это проверить, потому что там есть "
+    "несколько странных деталей, и я не хочу, чтобы они куда-то пропали."
+)
+
+
+def _raw_first_setup(*, from_user_id: int = 2000, caption: str | None = None, caption_entities=()):
+    message = make_message(from_user_id=from_user_id, caption=caption, caption_entities=caption_entities)
+    event = make_event(message)
+    bot = FakeBot()
+    gateway = SimpleNamespace(adapters={event.source.platform: FakeAdapter(bot)})
+    return message, event, bot, gateway
+
+
+@pytest.mark.asyncio
+async def test_incoming_raw_reply_is_visible_before_cleanup_then_edited_in_place(plugin, caplog):
+    _message, event, bot, gateway = _raw_first_setup()
+    seen_while_pending: list[list[str]] = []
+    release = asyncio.Event()
+
+    async def cleanup(_text):
+        seen_while_pending.append([call["text"] for call in bot.delivered_calls])
+        await release.wait()
+        return RAW_FIRST_CLEAN
+
+    task = asyncio.create_task(plugin._process_business_voice_event(
+        event=event, gateway=gateway, transcribe_fn=lambda _path: {"success": True, "transcript": RAW_FIRST_RAW},
+        cleanup_fn=cleanup,
+    ))
+    while not seen_while_pending:
+        await asyncio.sleep(0)
+    release.set()
+    with caplog.at_level("INFO"):
+        await task
+
+    assert seen_while_pending == [[f"🎙️ {RAW_FIRST_RAW}"]]
+    assert len(bot.delivered_calls) == 1
+    text = f"🎙️ {RAW_FIRST_CLEAN}"
+    assert bot.text_edit_calls == [{
+        "chat_id": 991, "message_id": 500, "business_connection_id": "business-123", "text": text,
+        "entities": ({"type": "expandable_blockquote", "offset": 0, "length": plugin._telegram_text_length(text)},),
+    }]
+    assert plugin._PENDING_TRANSCRIPTS == {}
+    log = "\n".join(record.getMessage() for record in caplog.records if "transcribed business" in record.getMessage())
+    assert "cleanup=edited" in log and "first_visible_ms=" in log and "stt_ms=" in log
+    assert RAW_FIRST_RAW not in log and RAW_FIRST_CLEAN not in log
+
+
+@pytest.mark.asyncio
+async def test_outgoing_caption_shows_raw_then_cleaned_and_keeps_its_caption(plugin):
+    bold = {"type": "bold", "offset": 0, "length": 5}
+    message, event, bot, gateway = _raw_first_setup(from_user_id=1000, caption="Notes", caption_entities=(bold,))
+
+    await plugin._process_business_voice_event(
+        event=event, gateway=gateway, transcribe_fn=lambda _path: {"success": True, "transcript": RAW_FIRST_RAW},
+        cleanup_fn=lambda _text: RAW_FIRST_CLEAN,
+    )
+
+    assert bot.calls == []
+    assert [call["caption"] for call in bot.edit_calls] == [f"Notes\n\n🎙️ {RAW_FIRST_RAW}",
+                                                            f"Notes\n\n🎙️ {RAW_FIRST_CLEAN}"]
+    for call in bot.edit_calls:
+        assert call["caption_entities"][0] == bold
+        assert call["caption_entities"][1]["offset"] == plugin._telegram_text_length("Notes\n\n")
+    assert message.caption == "Notes"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup", [lambda _text: RAW_FIRST_RAW, lambda _text: 1 / 0, lambda _text: "Короче."])
+async def test_failed_rejected_or_unchanged_cleanup_leaves_the_raw_reply(plugin, monkeypatch, cleanup):
+    monkeypatch.setenv("TELESEC_SEND_ERRORS", "1")
+    _message, event, bot, gateway = _raw_first_setup()
+
+    await plugin._process_business_voice_event(
+        event=event, gateway=gateway, transcribe_fn=lambda _path: {"success": True, "transcript": RAW_FIRST_RAW},
+        cleanup_fn=cleanup,
+    )
+
+    assert [call["text"] for call in bot.delivered_calls] == [f"🎙️ {RAW_FIRST_RAW}"]
+    assert bot.text_edit_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cleaned_text_that_outgrows_the_caption_keeps_the_raw_caption(plugin):
+    caption = "x" * (1024 - plugin._telegram_text_length(f"\n\n🎙️ {RAW_FIRST_RAW}"))
+    _message, event, bot, gateway = _raw_first_setup(from_user_id=1000, caption=caption)
+
+    await plugin._process_business_voice_event(
+        event=event, gateway=gateway, transcribe_fn=lambda _path: {"success": True, "transcript": RAW_FIRST_RAW},
+        cleanup_fn=lambda _text: RAW_FIRST_CLEAN,
+    )
+
+    assert len(bot.edit_calls) == 1 and bot.edit_calls[0]["caption"].endswith(RAW_FIRST_RAW)
+    assert bot.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_edit_leaves_the_raw_reply_without_a_second_transcript(plugin):
+    _message, event, bot, gateway = _raw_first_setup()
+    bot.text_edit_error = BadRequest("Message to edit not found")
+
+    await plugin._process_business_voice_event(
+        event=event, gateway=gateway, transcribe_fn=lambda _path: {"success": True, "transcript": RAW_FIRST_RAW},
+        cleanup_fn=lambda _text: RAW_FIRST_CLEAN,
+    )
+
+    assert len(bot.delivered_calls) == 1
+    assert len(bot.text_edit_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_unsupported_expandable_quote_retries_the_edit_as_plain_text(plugin):
+    _message, event, bot, gateway = _raw_first_setup()
+    bot.expandable_entities_unsupported = True
+
+    await plugin._process_business_voice_event(
+        event=event, gateway=gateway, transcribe_fn=lambda _path: {"success": True, "transcript": RAW_FIRST_RAW},
+        cleanup_fn=lambda _text: RAW_FIRST_CLEAN,
+    )
+
+    assert [call["text"] for call in bot.delivered_calls] == [f"🎙️ {RAW_FIRST_RAW}"]
+    assert [("entities" in call, call["text"]) for call in bot.text_edit_calls] == [
+        (True, f"🎙️ {RAW_FIRST_CLEAN}"), (False, f"🎙️ {RAW_FIRST_CLEAN}")]
+
+
+@pytest.mark.asyncio
+async def test_an_owner_edit_during_cleanup_is_kept(plugin):
+    _message, event, bot, gateway = _raw_first_setup()
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def cleanup(_text):
+        started.set()
+        await release.wait()
+        return RAW_FIRST_CLEAN
+
+    task = asyncio.create_task(plugin._process_business_voice_event(
+        event=event, gateway=gateway, transcribe_fn=lambda _path: {"success": True, "transcript": RAW_FIRST_RAW},
+        cleanup_fn=cleanup,
+    ))
+    await started.wait()
+
+    def edit(text):
+        return SimpleNamespace(edited_business_message=SimpleNamespace(
+            business_connection_id="business-123", chat=SimpleNamespace(id=991), message_id=500, text=text,
+            caption=None))
+
+    plugin._note_transcript_target_edit(edit(f"🎙️ {RAW_FIRST_RAW}"))  # the echo of Telesec's own reply
+    assert plugin._PENDING_TRANSCRIPTS[("business-123", "991", "500")]
+    plugin._note_transcript_target_edit(edit("🎙️ my own words"))
+    release.set()
+    await task
+
+    assert bot.text_edit_calls == []
+    assert plugin._PENDING_TRANSCRIPTS == {}
+
+
+@pytest.mark.asyncio
+async def test_a_raw_transcript_longer_than_one_message_is_still_cleaned_first(plugin):
+    _message, event, bot, gateway = _raw_first_setup()
+    raw = " ".join([RAW_FIRST_RAW] * 30)
+    cleaned = " ".join([RAW_FIRST_CLEAN] * 30)
+
+    await plugin._process_business_voice_event(
+        event=event, gateway=gateway, transcribe_fn=lambda _path: {"success": True, "transcript": raw},
+        cleanup_fn=lambda _text: cleaned,
+    )
+
+    assert len(bot.delivered_calls) > 1
+    assert bot.delivered_calls[0]["text"].startswith(f"🎙️ {RAW_FIRST_CLEAN}")
+    assert bot.text_edit_calls == []
+
+
+@pytest.mark.asyncio
+async def test_manual_caption_edit_before_raw_request_returns_is_preserved(plugin):
+    module = plugin
+    message, event, bot, gateway = _raw_first_setup(from_user_id=1000, caption="Notes")
+    visible = None
+    edits = []
+    async def edit_caption(**kwargs):
+        nonlocal visible
+        edits.append(kwargs)
+        visible = kwargs['caption']
+        if len(edits) == 1:
+            # Telegram applied raw, then owner edited, while the API response is still pending.
+            visible = "Owner's revised caption"
+            module._note_transcript_target_edit(SimpleNamespace(edited_business_message=SimpleNamespace(
+                business_connection_id="business-123", chat=SimpleNamespace(id=991),
+                message_id=message.message_id, text=None, caption=visible)))
+        return True
+    bot.edit_message_caption = edit_caption
+    await module._publish_transcript(bot=bot, adapter=gateway.adapters[event.source.platform], message=message,
+        transcript=RAW_FIRST_RAW, cleanup_fn=lambda _: RAW_FIRST_CLEAN, llm=None)
+    assert visible == "Owner's revised caption", "Cleanup overwrote an owner edit observed before raw request returned"
+
+
+@pytest.mark.asyncio
+async def test_owner_edit_during_rejected_cleanup_request_prevents_plain_retry(plugin):
+    module = plugin
+    message, event, bot, gateway = _raw_first_setup()
+    edits = []
+    visible = None
+    async def edit_text(**kwargs):
+        nonlocal visible
+        edits.append(kwargs)
+        if len(edits) == 1:
+            visible = "Owner's own words"
+            module._note_transcript_target_edit(SimpleNamespace(edited_business_message=SimpleNamespace(
+                business_connection_id="business-123", chat=SimpleNamespace(id=991), message_id=500,
+                caption=None, text=visible)))
+            raise RuntimeError("unsupported message entity type: expandable_blockquote")
+        visible = kwargs['text']
+        return True
+    bot.edit_message_text = edit_text
+    await module._publish_transcript(bot=bot, adapter=gateway.adapters[event.source.platform], message=message,
+        transcript=RAW_FIRST_RAW, cleanup_fn=lambda _: RAW_FIRST_CLEAN, llm=None)
+    assert visible == "Owner's own words", "Plain retry ignored already observed cancellation and overwrote owner edit"
+
+
+@pytest.mark.asyncio
+async def test_owner_reply_edit_before_send_returns_is_preserved(plugin):
+    message, event, bot, gateway = _raw_first_setup()
+    original_send = bot.send_message
+
+    async def send(**kwargs):
+        result = await original_send(**kwargs)
+        plugin._note_transcript_target_edit(SimpleNamespace(edited_business_message=SimpleNamespace(
+            business_connection_id="business-123", chat=SimpleNamespace(id=991),
+            message_id=result.message_id, text="Owner's revised reply", caption=None)))
+        return result
+
+    bot.send_message = send
+    timings = {}
+    await plugin._publish_transcript(bot=bot, adapter=gateway.adapters[event.source.platform], message=message,
+        transcript=RAW_FIRST_RAW, cleanup_fn=lambda _: RAW_FIRST_CLEAN, llm=None, timings=timings)
+    assert bot.text_edit_calls == []
+    assert timings["cleanup"] == "owner_edited"

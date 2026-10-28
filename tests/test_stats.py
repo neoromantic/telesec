@@ -801,6 +801,21 @@ def test_message_counted_once(plugin):
     assert contact["sessions"]["total"] == 1
 
 
+def test_telesec_cleaning_its_own_transcript_reply_is_no_sent_edit(plugin, cs):
+    at = _utc(2026, 10, 10, 9, 0)
+    later = at + timedelta(seconds=40)
+    transcript, transcript_edit = _msg(plugin, 1, at, "outbound"), _msg(plugin, 1, at, "outbound", edited=True,
+                                                                         observed=later)
+    transcript["text"], transcript_edit["text"] = "🎙️ raw words", "🎙️ Clean words."
+    transcript_edit["edit_origin"] = "transcript_cleanup"
+    own_edit = _msg(plugin, 2, at, "outbound", edited=True, observed=later)
+
+    stats = cs.compute_stats(_entry(), [transcript, transcript_edit, _msg(plugin, 2, at, "outbound"), own_edit],
+                             _window(cs))
+
+    assert (stats.edited.total, stats.edited.sent) == (1, 1)
+
+
 def test_latest_known_direction_wins(plugin, cs):
     at = _utc(2026, 10, 10, 9, 0)
     later = at + timedelta(minutes=5)
@@ -3068,3 +3083,23 @@ def test_skill_has_stats_recipe(plugin):
         container = by_mode["overview"]["overview"] if block == "overview" else by_mode["contact"]["contacts"][0][block]
         assert key in container, reference
     assert "`unknown_direction`" in section and "unknown_direction" in by_mode["contact"]["contacts"][0]["messages"]
+
+
+def test_owner_edit_with_microphone_prefix_counts(plugin, cs):
+    at = _utc(2026, 10, 10, 9, 0)
+    original = _msg(plugin, 1, at, "outbound")
+    edited = _msg(plugin, 1, at, "outbound", edited=True, observed=at + timedelta(seconds=40))
+    original["text"], edited["text"] = "🎙️ Meet me at five", "🎙️ Meet me at six"
+    stats = cs.compute_stats(_entry(), [original, edited], _window(cs))
+    assert stats.edited.sent == 1
+
+
+def test_cleanup_confirmation_does_not_hide_another_owner_edit(plugin, cs):
+    at = _utc(2026, 10, 10, 9, 0)
+    original = _msg(plugin, 1, at, "outbound")
+    cleanup = _msg(plugin, 1, at, "outbound", edited=True, observed=at + timedelta(seconds=1))
+    manual = _msg(plugin, 1, at, "outbound", edited=True, observed=at + timedelta(seconds=2))
+    manual["text"] = "🎙️ Owner's revised words"
+    confirmation = {**cleanup, "event_type": "transcript.cleanup_confirmed", "edited_event_id": cleanup["event_id"]}
+    stats = cs.compute_stats(_entry(), [original, cleanup, manual, confirmation], _window(cs))
+    assert stats.edited.sent == 1

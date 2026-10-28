@@ -315,7 +315,7 @@ def run_import(path: Path, *, chat: str, connection: str | None = None, dry_run:
         raise ValueError("your chat with the bot is never saved, so it cannot be imported")
     config = _history.history_config_from_env()
     if not config.enabled:
-        raise ValueError("history is off in Settings; turn on Save history first")
+        raise ValueError("history is off in Settings; turn it on first")
     messages = load_export(path, chat_id)
     business_connection_id, has_history = _resolve_connection(chat_id, connection)
     reason = _chat_settings.pause_reason(business_connection_id, chat_id, "history",
@@ -327,7 +327,7 @@ def run_import(path: Path, *, chat: str, connection: str | None = None, dry_run:
         raise ValueError("chat settings can't be read, so history is paused for every chat; see "
                          "'hermes telesec chat list'")
     if reason is not None:
-        raise ValueError(f"chat {chat_id} is set to Don't save; turn Save history on for it first")
+        raise ValueError(f"history is off for chat {chat_id}; turn it on first: 'hermes telesec chat set {chat_id} --history on'")
     owner_id = export_owner(messages, chat_id, _chat_settings.known_owner(business_connection_id))
     current = now or datetime.now(UTC)
     retention_cutoff = current - timedelta(days=config.retention_days) if config.retention_days > 0 else None

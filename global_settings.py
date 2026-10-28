@@ -1,6 +1,6 @@
-"""Global Telesec switches: transcription, history and dossiers, for all chats, and history retention.
+"""Global Telesec switches: transcription, history, dossiers and deletion alerts, for all chats, and history retention.
 
-Transcription, history and retention live in ``$HERMES_HOME/data/telesec/settings.json``. The dossier
+Transcription, history, deletion alerts and retention live in ``$HERMES_HOME/data/telesec/settings.json``. The dossier
 switch stays in ``dossiers/settings.json`` (0.11.0), so a rollback keeps it. Readers stat the file on
 every call and re-read it only when it changed, so a change from Telegram or the CLI applies to the
 next update without a restart.
@@ -30,10 +30,10 @@ from . import transcription_modes as _modes
 
 logger = logging.getLogger(__name__)
 
-FEATURES = ("transcription", "history", "dossiers")
-# Dossiers keep their own 0.11.0 file; these two live in settings.json.
-STORED_FEATURES = ("transcription", "history")
-DEFAULTS = {"transcription": True, "history": False, "dossiers": False}
+FEATURES = ("transcription", "history", "dossiers", "alerts")
+# Dossiers keep their own 0.11.0 file; the others live in settings.json.
+STORED_FEATURES = ("transcription", "history", "alerts")
+DEFAULTS = {"transcription": True, "history": False, "dossiers": False, "alerts": True}
 UPDATED_VIA = ("telegram", "cli")
 MIGRATION_VIA = "migration"
 SCHEMA_VERSION = 1
@@ -211,6 +211,11 @@ def enabled(feature: str) -> bool:
 def dossiers_active() -> bool:
     """Dossiers are on and history is on: dossiers are built from history."""
     return enabled("dossiers") and enabled("history")
+
+
+def alerts_active() -> bool:
+    """Deletion alerts are on and history is on: deletions are found in saved history."""
+    return enabled("alerts") and enabled("history")
 
 
 def retention_days() -> int:
@@ -451,7 +456,8 @@ def add_settings_parser(subs: Any) -> None:
     parser.add_argument("--format", choices=["text", "json"], default="text")
     parser.set_defaults(_settings_action="show")
     actions = parser.add_subparsers(dest="telesec_settings_command")
-    set_parser = actions.add_parser("set", help="Turn transcription, history or dossiers on or off for all chats, "
+    set_parser = actions.add_parser("set", help="Turn transcription, history, dossiers or deletion alerts on or off "
+                                                "for all chats, "
                                                 "or set how long history is kept")
     set_parser.add_argument("feature", choices=[*FEATURES, RETENTION])
     set_parser.add_argument("value", help=f"on|off; for retention: {RETENTION_VALUES} (days)")
@@ -466,13 +472,14 @@ def _mode_count() -> int | None:
 
 
 def _chat_counts() -> dict[str, int | None]:
-    """Chats with history or the dossier off, and the old scope rule (None while chat-settings.json can't be read)."""
+    """Chats with history, the dossier or deletion alerts off, and the old scope rule (None while
+    chat-settings.json can't be read)."""
     from . import chat_settings  # lazy: chat_settings imports this module
 
     try:
         return dict(chat_settings.default_store().counts())
     except (OSError, ValueError):
-        return {"history": None, "dossier": None}
+        return {"history": None, "dossier": None, "alerts": None}
 
 
 def _status_line(feature: str, item: dict[str, Any]) -> str:
@@ -496,23 +503,27 @@ def _show(as_json: bool) -> int:
         print(json.dumps(document, ensure_ascii=True, indent=2))
         return 0
     lines = ["Telesec settings (all chats):"]
-    lines += [_status_line(feature, current[feature]) for feature in ("transcription", "history", RETENTION, "dossiers")]
+    lines += [_status_line(feature, current[feature])
+              for feature in ("transcription", "history", RETENTION, "dossiers", "alerts")]
     if paused:
         lines.append("note: dossiers are paused while history is off.")
+    if current["alerts"]["enabled"] and not current["history"]["enabled"]:
+        lines.append("note: deletion alerts are paused while history is off.")
     if degraded:
         lines.append(f"warning: {settings_path()} is unreadable; {SAVE_HINT}.")
     if modes is not None:
         lines.append(f"Per-chat transcription modes: {modes}")
     if chats["history"] is None:
         lines.append("warning: chat-settings.json is unreadable; see 'hermes telesec chat list'.")
-    elif chats["history"] or chats["dossier"]:
-        lines.append(f"Chats with history off: {chats['history']}; with the dossier off: {chats['dossier']}")
+    elif chats["history"] or chats["dossier"] or chats["alerts"]:
+        lines.append(f"Chats with history off: {chats['history']}; with the dossier off: {chats['dossier']}; "
+                     f"with deletion alerts off: {chats['alerts']}")
     if chats.get("old_scope"):
         lines.append(f"Old history scope rule: applies; chats it keeps out don't save history unless turned on "
                      f"({chats['history_on']} turned on). See 'hermes telesec chat scope'.")
     for name in ignored:
         lines.append(f"note: {name} is set in this process but no longer read.")
-    lines.append(f"Change: '{SETTINGS_COMMAND} set <transcription|history|dossiers> on|off', "
+    lines.append(f"Change: '{SETTINGS_COMMAND} set <transcription|history|dossiers|alerts> on|off', "
                  f"'{SETTINGS_COMMAND} set retention {RETENTION_VALUES}', or /telesec in your private chat with the bot.")
     print("\n".join(lines))
     return 0

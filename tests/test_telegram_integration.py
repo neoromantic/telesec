@@ -408,3 +408,99 @@ async def test_real_ptb_off_then_both_gates_media_download(plugin, telegram_app,
     await process(2)
     download.assert_awaited_once()
     assert core.await_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["caption", "reply"])
+@pytest.mark.parametrize("during_retry", [False, True])
+async def test_real_ptb_preserves_owner_edit_before_api_response(
+    plugin, telegram_app, monkeypatch, surface, during_retry,
+):
+    app, request = telegram_app
+    adapter = SimpleNamespace(platform="telegram", _bot=app.bot)
+    plugin._register_telegram_handlers(app, adapter)
+    message = _business_update(app, sender_id=1000, caption="Notes", voice={
+        "file_id": "v", "file_unique_id": "v", "duration": 3}).effective_message
+    if surface == "reply":
+        message = _business_update(app, sender_id=2000, voice={
+            "file_id": "v", "file_unique_id": "v", "duration": 3}).effective_message
+    original_request = request.do_request
+    writes = []
+    endpoint = "editMessageCaption" if surface == "caption" else "editMessageText"
+    field = "caption" if surface == "caption" else "text"
+    if surface == "reply":
+        request.responses[endpoint] = (200, {"ok": True, "result": True})
+
+    async def do_request(url, method, request_data=None, **kwargs):
+        called = url.rsplit("/", 1)[-1]
+        raw_call = called == endpoint if surface == "caption" else called == "sendMessage"
+        cleanup_call = called == endpoint and (surface == "reply" or len(writes) == 1)
+        if called in {endpoint, "sendMessage"}:
+            writes.append(called)
+        if (during_retry and cleanup_call) or (not during_retry and raw_call):
+            manual = Update.de_json({"update_id": 43, "edited_business_message": {
+                "message_id": 77 if surface == "caption" else 700,
+                "date": int(datetime.now(UTC).timestamp()), "business_connection_id": "business-123",
+                "chat": {"id": 991, "type": "private"},
+                "from": {"id": 1000, "is_bot": False, "first_name": "Owner"},
+                field: "Owner's own words",
+            }}, app.bot)
+            await app.process_update(manual)
+            if during_retry:
+                return 400, json.dumps({"ok": False, "description":
+                    "Bad Request: unsupported message entity type: expandable_blockquote"}).encode()
+        return await original_request(url, method, request_data=request_data, **kwargs)
+
+    monkeypatch.setattr(request, "do_request", do_request)
+    timings = {}
+    await plugin._publish_transcript(bot=app.bot, adapter=adapter, message=message,
+        transcript=test_plugin.RAW_FIRST_RAW, cleanup_fn=lambda _: test_plugin.RAW_FIRST_CLEAN,
+        llm=None, timings=timings)
+    assert len(writes) == (2 if during_retry else 1)
+    assert timings["cleanup"] == "owner_edited"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("same_proposal", "applied"), [(False, False), (True, False), (True, True)])
+async def test_cleanup_provenance_waits_for_api_result(
+    plugin, telegram_app, monkeypatch, same_proposal, applied,
+):
+    module = plugin
+    test_history.set_switch(module, "history", True)
+    observed = datetime(2026, 10, 10, tzinfo=UTC)
+    app, request = telegram_app
+    adapter = SimpleNamespace(platform="telegram", _bot=app.bot)
+    module._register_telegram_handlers(app, adapter)
+    message = _business_update(app, sender_id=2000, voice={
+        "file_id": "v", "file_unique_id": "v", "duration": 3}).effective_message
+    await module._history_support.observe_ptb_update(test_history.make_business_text_update(
+        text="🎙️ " + test_plugin.RAW_FIRST_RAW, message_id=700, update_id=1, from_user_id=1000, date=observed),
+        bot=app.bot, now=observed)
+    original = request.do_request
+    async def request_with_owner_edit(url, method, request_data=None, **kwargs):
+        if url.rsplit("/", 1)[-1] == "editMessageText":
+            text = request_data.json_parameters["text"] if same_proposal else "🎙️ Owner's own words"
+            manual = Update.de_json({"update_id": 44, "edited_business_message": {
+                "message_id": 700, "date": int(observed.timestamp()), "business_connection_id": "business-123",
+                "chat": {"id": 991, "type": "private"},
+                "from": {"id": 1000, "is_bot": False, "first_name": "Owner"}, "text": text,
+            }}, app.bot)
+            await app.process_update(manual)
+            if applied:
+                return 200, json.dumps({"ok": True, "result": True}).encode()
+            return 400, json.dumps({"ok": False, "description": "Bad Request: message can not be edited"}).encode()
+        return await original(url, method, request_data=request_data, **kwargs)
+    monkeypatch.setattr(request, "do_request", request_with_owner_edit)
+    timings = {}
+    await module._publish_transcript(bot=app.bot, adapter=adapter, message=message,
+        transcript=test_plugin.RAW_FIRST_RAW, cleanup_fn=lambda _: test_plugin.RAW_FIRST_CLEAN, llm=None, timings=timings)
+    assert timings["cleanup"] == ("edited" if applied else "edit_failed")
+    records = test_history.load_records(module)
+    if not applied:
+        assert records[-1]["event_type"] == "message.edited"
+    scan = module.correspondence_stats.ChatScan("business-123", "991")
+    for ordinal, record in enumerate(records):
+        scan.consume(record, ordinal)
+    assert scan.messages["700"].edited is not applied
+    if not applied:
+        assert records[-1].get("edit_origin") is None

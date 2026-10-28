@@ -30,7 +30,7 @@ from . import transcription_modes as _modes
 logger = logging.getLogger(__name__)
 
 SECTION_KEY = "dossier"
-SECTION_LABEL = "Dossier"
+SECTION_LABEL = "📖 Open dossier"
 REFRESH_THREAD_NAME = "telesec-dossier-refresh"
 COMMAND_IDENTITY = "dossier-command"
 
@@ -412,7 +412,7 @@ def register_owner_panel_section(owner_panel: Any,
         return panel_view(owner_panel, view, ctx.chat_id)
 
     owner_panel.register_strings({"en": {f"section.{SECTION_KEY}": SECTION_LABEL},
-                                  "ru": {f"section.{SECTION_KEY}": "Досье"}})
+                                  "ru": {f"section.{SECTION_KEY}": "📖 Открыть досье"}})
     owner_panel.register_section(SECTION_KEY, SECTION_LABEL, render)
 
 

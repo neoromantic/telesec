@@ -33,14 +33,16 @@ set_retention = test_history.set_retention
 RETENTION_ROW = [("• Forever", "tb:s:0:settings/r.0"), ("1 year", "tb:s:0:settings/r.365"),
                  ("90 days", "tb:s:0:settings/r.90"), ("30 days", "tb:s:0:settings/r.30")]
 MANAGER_ROWS = [
-    [("• Transcribe", "tb:s:0:settings/t.on"), ("Don't transcribe", "tb:s:0:settings/t.off")],
-    [("Save history", "tb:s:0:settings/h.on"), ("• Don't save", "tb:s:0:settings/h.off")],
-    RETENTION_ROW,
-    [("Keep dossiers", "tb:s:0:settings/d.ask"), ("• No dossiers", "tb:s:0:settings/d.off")],
+    [("🎙️ Transcription ✅", "tb:s:0:settings/t.off")],
+    [("🗂️ History ❌", "tb:s:0:settings/h.on")],
+    [("⏳ Keep history: forever ›", "tb:s:0:settings/r")],
+    [("📇 Dossiers ❌", "tb:s:0:settings/d.ask")],
+    [("🔔 Deletion alerts ✅", "tb:s:0:settings/a.off")],
 ]
 MODEL_LINES = "Dossier model: ai-gateway / google/gemini-3.8-flash\nVoice cleanup: gemini / gemini-3.8-flash"
-MANAGER_TAIL = f"Keep history: forever\n{MODEL_LINES}"
-MANAGER_TEXT = f"Telesec settings · all chats\nOne chat: Manage Bot in that chat.\n{MANAGER_TAIL}"
+ALERTS_PAUSED = "Deletion alerts are paused while history is off."
+MANAGER_TAIL = MODEL_LINES
+MANAGER_TEXT = f"Telesec settings · all chats\nOne chat: Manage Bot in that chat.\n{ALERTS_PAUSED}\n{MANAGER_TAIL}"
 SENT_TO = ("The text of ALL private chats will be sent to ai-gateway / google/gemini-3.8-flash to build a dossier for "
            "each contact and your persona.")
 ROUTE_LINE = ("Dossiers use the Telesec dossiers model task; change it with 'hermes model'. If that model fails, Hermes "
@@ -265,9 +267,10 @@ def test_corrupt_file_keeps_the_last_valid_switches_and_only_the_cli_repairs_it(
 def test_cli_shows_and_sets_every_switch(gs, plugin, monkeypatch):
     code, out = ttm.run_cli(plugin, "settings")
     assert code == 0
-    assert out.splitlines()[:5] == ["Telesec settings (all chats):", "transcription: on (default)",
-                                    "history: off (default)", "retention: forever (default)", "dossiers: off (default)"]
-    assert ("Change: 'hermes telesec settings set <transcription|history|dossiers> on|off', "
+    assert out.splitlines()[:7] == ["Telesec settings (all chats):", "transcription: on (default)",
+                                    "history: off (default)", "retention: forever (default)", "dossiers: off (default)",
+                                    "alerts: on (default)", "note: deletion alerts are paused while history is off."]
+    assert ("Change: 'hermes telesec settings set <transcription|history|dossiers|alerts> on|off', "
             "'hermes telesec settings set retention forever|365|90|30|N'") in out
 
     code, out = ttm.run_cli(plugin, "settings", "set", "dossiers", "on")
@@ -287,7 +290,9 @@ def test_cli_shows_and_sets_every_switch(gs, plugin, monkeypatch):
         False, True, True)
     assert data["transcription"]["updated_via"] == "cli" and data["dossiers"]["paused"] is False
     assert data["ignored_env"] == ["TELESEC_DISABLE"] and data["settings_file_unreadable"] is False
-    assert data["chat_overrides"] == {"transcription": 0, "history": 0, "dossier": 0, "history_on": 0, "old_scope": 0}
+    assert data["chat_overrides"] == {"transcription": 0, "history": 0, "dossier": 0, "alerts": 0, "history_on": 0,
+                                      "old_scope": 0}
+    assert data["alerts"]["enabled"] is True and data["alerts"]["source"] == "default"
     assert plugin._disabled() is True  # the stored switch, not TELESEC_DISABLE=0
 
 
@@ -424,12 +429,12 @@ def test_manager_view_from_telesec(gs, plugin):
     assert rows(view) == MANAGER_ROWS
     ru = plugin._settings_panel.render(ctx(plugin, lang="ru"))
     assert ru.text == ("Настройки Telesec · все чаты\nДля одного чата — кнопка управления ботом в нём.\n"
-                       "Хранить историю: всегда\n"
+                       "Уведомления об удалении на паузе, пока история выключена.\n"
                        "Модель досье: ai-gateway / google/gemini-3.8-flash\n"
                        "Очистка расшифровок: gemini / gemini-3.8-flash")
     assert [[label for label, _data in row] for row in ru.buttons] == [
-        ["• Расшифровывать", "Не расшифровывать"], ["Сохранять историю", "• Не сохранять"],
-        ["• Всегда", "1 год", "90 дней", "30 дней"], ["Вести досье", "• Не вести"]]
+        ["🎙️ Расшифровка ✅"], ["🗂️ История ❌"], ["⏳ Хранить историю: всегда ›"], ["📇 Досье ❌"],
+        ["🔔 Уведомления об удалении ✅"]]
 
 
 def test_another_owner_sees_a_read_only_view_and_cannot_write(gs, plugin, modes):
@@ -437,16 +442,17 @@ def test_another_owner_sees_a_read_only_view_and_cannot_write(gs, plugin, modes)
     modes.default_store().bind_connection(OTHER, str(PEER))  # someone else connected the same bot
 
     view = plugin._settings_panel.render(ctx(plugin, PEER, OTHER))
-    assert view.text == ("Telesec settings · all chats\nTranscription: on\nHistory: off\nKeep history: forever\n"
-                         f"Dossiers: off\n{MODEL_LINES}\nOnly the owner of every connected account can change these.")
+    assert view.text == (f"Telesec settings · all chats\n{ALERTS_PAUSED}\n🎙️ Transcription: on\n🗂️ History: off\n"
+                         "⏳ Keep history: forever\n📇 Dossiers: off\n🔔 Deletion alerts: on\n"
+                         f"{MODEL_LINES}\nOnly the owner of every connected account can change these.")
     assert view.buttons == []
     for arg in plugin._settings_panel.ARGS:  # a forged button
         forged = plugin._settings_panel.render(ctx(plugin, PEER, OTHER, arg=arg))
-        assert forged.text.splitlines()[1] == "Not allowed" and forged.buttons == []
+        assert forged.text.splitlines()[1] == "Not allowed" and forged.buttons == [], arg
     assert not gs.settings_path().exists() and gs.enabled("dossiers") is False
     assert plugin._settings_panel.render(ctx(plugin, OWNER, BCID)).buttons == []  # OWNER does not own OTHER
     ru = plugin._settings_panel.render(ctx(plugin, PEER, OTHER, lang="ru"))
-    assert "Расшифровка: вкл\nИстория: выкл\nХранить историю: всегда\nДосье: выкл" in ru.text
+    assert "🎙️ Расшифровка: вкл\n🗂️ История: выкл\n⏳ Хранить историю: всегда\n📇 Досье: выкл" in ru.text
 
 
 def test_dossiers_ask_first_and_need_history(gs, plugin):
@@ -469,18 +475,20 @@ def test_dossiers_ask_first_and_need_history(gs, plugin):
 
     on = panel.render(ctx(plugin, arg="d.yes"))
     assert on.text.splitlines()[1] == "Dossiers are on."
-    assert rows(on)[3] == [("• Keep dossiers", "tb:s:0:settings/d.on"), ("No dossiers", "tb:s:0:settings/d.off")]
+    assert rows(on)[3] == [("📇 Dossiers ✅", "tb:s:0:settings/d.off")]
     assert plugin._dossier_support.load_settings()["updated_via"] == "telegram"
 
     paused = panel.render(ctx(plugin, arg="h.off"))
     assert paused.text == ("Telesec settings · all chats\nHistory is off in all chats.\n"
-                           f"One chat: Manage Bot in that chat.\nDossiers are paused while history is off.\n{MANAGER_TAIL}")
+                           "One chat: Manage Bot in that chat.\nDossiers and deletion alerts are paused while history is "
+                           f"off.\n{MANAGER_TAIL}")
     assert gs.enabled("dossiers") is True and gs.dossiers_active() is False
     assert not plugin._history_support.history_config_from_env().active
 
     off = panel.render(ctx(plugin, arg="d.off", lang="ru"))
     assert off.text.splitlines()[1] == "Досье выключены во всех чатах."
-    assert "на паузе" not in off.text
+    assert "Досье на паузе" not in off.text
+    assert "Уведомления об удалении на паузе, пока история выключена." in off.text.splitlines()
 
 
 def test_a_stale_keep_dossiers_button_asks_again(gs, plugin):
@@ -488,7 +496,7 @@ def test_a_stale_keep_dossiers_button_asks_again(gs, plugin):
     panel = plugin._settings_panel
     set_switch(plugin, "history", True)
     set_switch(plugin, "dossiers", True)
-    assert rows(panel.render(ctx(plugin)))[3][0] == ("• Keep dossiers", "tb:s:0:settings/d.on")
+    assert rows(panel.render(ctx(plugin)))[3][0] == ("📇 Dossiers ✅", "tb:s:0:settings/d.off")
     set_switch(plugin, "dossiers", False)  # turned off since that message was sent
 
     stale = panel.render(ctx(plugin, arg="d.on"))
@@ -529,10 +537,10 @@ def test_every_settings_callback_fits_telegram(gs, plugin, chat):
     set_switch(plugin, "history", True)
     gs.set_retention(gs.MAX_RETENTION_DAYS, via="cli")  # the longest day count gets its own button
     panel = plugin._settings_panel
-    views = [panel.render(ctx(plugin, arg=arg, chat=chat)) for arg in (None, "d.ask", "r.365", "r.30")]
+    views = [panel.render(ctx(plugin, arg=arg, chat=chat)) for arg in (None, "d.ask", "r", "r.365", "r.30")]
     views.append(plugin._owner_panel.with_back(views[0], chat))
     data = [d for view in views for row in view.buttons for _label, d in row]
-    assert len(data) == 11 + 2 + 2 + 2 + 12
+    assert len(data) == 5 + 2 + 6 + 2 + 2 + 6
     for item in data:
         assert len(item.encode()) <= plugin._owner_panel.MAX_CALLBACK_BYTES
         assert plugin._owner_panel.parse_callback(item) is not None
@@ -600,7 +608,7 @@ async def test_settings_buttons_on_the_telesec_message(gs, plugin):
     assert bot.answers == [{"callback_query_id": "query-1"}]  # a switch is no news: no toast
     text, keyboard = top.last_edit(bot)
     assert text == f"Telesec settings · all chats\nHistory is on.\nOne chat: Manage Bot in that chat.\n{MANAGER_TAIL}"
-    assert keyboard[1] == [("• Save history", "tb:s:0:settings/h.on"), ("Don't save", "tb:s:0:settings/h.off")]
+    assert keyboard[1] == [("🗂️ History ✅", "tb:s:0:settings/h.off")]
     assert gs.enabled("history") is True
 
     assert await top.dispatch(plugin, top.callback_update("tb:s:0:settings"), bot) is True  # Cancel
@@ -630,13 +638,13 @@ async def test_settings_from_a_chat_panel_keeps_its_back_button(gs, plugin):
 
     assert await top.dispatch(plugin, top.start_update(), bot) is True
     assert top.keyboard(bot.calls[0]["reply_markup"])[-1] == [("⚙️ Settings", f"tb:s:{CHAT}:settings"),
-                                                            ("Refresh", f"tb:p:{CHAT}")]
+                                                            ("🔄 Refresh", f"tb:p:{CHAT}")]
 
     assert await top.dispatch(plugin, top.callback_update(f"tb:s:{CHAT}:settings/t.off"), bot) is True
     text, keyboard = top.last_edit(bot)
-    assert text == f"Telesec settings · all chats\nTranscription is off in all chats.\n{MANAGER_TAIL}"  # no "One chat"
-    assert keyboard[0] == [("Transcribe", f"tb:s:{CHAT}:settings/t.on"),
-                           ("• Don't transcribe", f"tb:s:{CHAT}:settings/t.off")]
+    assert text == (f"Telesec settings · all chats\nTranscription is off in all chats.\n{ALERTS_PAUSED}\n"
+                    f"{MANAGER_TAIL}")  # no "One chat"
+    assert keyboard[0] == [("🎙️ Transcription ❌", f"tb:s:{CHAT}:settings/t.on")]
     assert keyboard[-1] == [("« Back", f"tb:b:{CHAT}")]
 
     assert await top.dispatch(plugin, top.callback_update(f"tb:b:{CHAT}"), bot) is True
@@ -701,8 +709,9 @@ def test_the_dossier_worker_pauses_while_history_is_off(gs, plugin):
 # --- Retention ------------------------------------------------------------------------------------
 
 
-def retention_labels(view) -> list[str]:
-    return [label for label, _data in rows(view)[2]]
+def retention_labels(plugin, lang=None) -> list[str]:
+    """The retention picker's choices (Settings ⏳ Keep history ›)."""
+    return [label for label, _data in rows(plugin._settings_panel.render(ctx(plugin, arg="r", lang=lang)))[0]]
 
 
 def test_retention_row_for_a_manager_and_read_only(gs, plugin, modes):
@@ -710,19 +719,24 @@ def test_retention_row_for_a_manager_and_read_only(gs, plugin, modes):
     set_retention(plugin, 90)
     panel = plugin._settings_panel
 
-    assert rows(panel.render(ctx(plugin)))[2] == [
-        ("Forever", "tb:s:0:settings/r.0"), ("1 year", "tb:s:0:settings/r.365"),
-        ("• 90 days", "tb:s:0:settings/r.90"), ("30 days", "tb:s:0:settings/r.30")]
-    manager_ru = panel.render(ctx(plugin, lang="ru"))
-    assert retention_labels(manager_ru) == ["Всегда", "1 год", "• 90 дней", "30 дней"]
-    assert "Хранить историю: 90 дней" in manager_ru.text.splitlines()  # readable when the row is cut off
+    assert rows(panel.render(ctx(plugin)))[2] == [("⏳ Keep history: 90 days ›", "tb:s:0:settings/r")]
+    picker = panel.render(ctx(plugin, arg="r"))
+    assert picker.text == ("Telesec settings · all chats\n⏳ Keep history: 90 days\nSaved messages are deleted a whole "
+                           "month at a time: a month is deleted at the next cleanup once all of it is older than that.")
+    assert rows(picker) == [
+        [("Forever", "tb:s:0:settings/r.0"), ("1 year", "tb:s:0:settings/r.365"),
+         ("• 90 days", "tb:s:0:settings/r.90"), ("30 days", "tb:s:0:settings/r.30")],
+        [("‹ Settings", "tb:s:0:settings")]]
+    assert rows(panel.render(ctx(plugin, lang="ru")))[2][0][0] == "⏳ Хранить историю: 90 дней ›"
+    assert retention_labels(plugin, "ru") == ["Всегда", "1 год", "• 90 дней", "30 дней"]
 
     modes.default_store().bind_connection(OTHER, str(PEER))
     read_only = panel.render(ctx(plugin, PEER, OTHER))
-    assert "History: off\nKeep history: 90 days\nDossiers: off" in read_only.text and read_only.buttons == []
-    for arg in ("r.30", "r.30.yes", "r.0", "r.90"):  # forged buttons
+    assert "🗂️ History: off\n⏳ Keep history: 90 days\n📇 Dossiers: off" in read_only.text
+    assert read_only.buttons == []
+    for arg in ("r", "r.30", "r.30.yes", "r.0", "r.90"):  # forged buttons
         forged = panel.render(ctx(plugin, PEER, OTHER, arg=arg))
-        assert forged.text.splitlines()[1] == "Not allowed" and forged.buttons == []
+        assert forged.text.splitlines()[1] == "Not allowed" and forged.buttons == [], arg
     assert gs.retention_days() == 90 and stored(plugin)["retention"]["updated_via"] == "cli"
     set_retention(plugin, 365)
     assert "Хранить историю: 1 год" in panel.render(ctx(plugin, PEER, OTHER, lang="ru")).text
@@ -743,8 +757,8 @@ def test_shorter_retention_asks_first_and_longer_applies_at_once(gs, plugin):
 
     done = panel.render(ctx(plugin, arg="r.30.yes"))
     assert done.text.splitlines()[1] == "History is kept 30 days."
-    assert retention_labels(done) == ["Forever", "1 year", "90 days", "• 30 days"]
-    assert "Keep history: 30 days" in done.text.splitlines()
+    assert retention_labels(plugin) == ["Forever", "1 year", "90 days", "• 30 days"]
+    assert rows(done)[2] == [("⏳ Keep history: 30 days ›", "tb:s:0:settings/r")]
     assert stored(plugin)["retention"]["days"] == 30 and stored(plugin)["retention"]["updated_via"] == "telegram"
 
     longer = panel.render(ctx(plugin, arg="r.90"))  # longer: no question
@@ -762,7 +776,8 @@ def test_retention_stays_while_history_is_off_and_turning_it_off_keeps_it(gs, pl
 
     off = panel.render(ctx(plugin, arg="h.off"))
 
-    assert retention_labels(off)[1] == "• 1 year" and gs.retention_days() == 365
+    assert retention_labels(plugin)[1] == "• 1 year" and gs.retention_days() == 365
+    assert rows(off)[2] == [("⏳ Keep history: 1 year ›", "tb:s:0:settings/r")]
     assert set(stored(plugin)) == {"schema_version", "history", "retention"}
     assert stored(plugin)["history"] == {"enabled": False, "updated_at": stored(plugin)["history"]["updated_at"],
                                          "updated_via": "telegram"}
@@ -794,8 +809,8 @@ def test_a_migrated_value_has_its_own_choice_until_changed(gs, plugin, monkeypat
     monkeypatch.setenv("TELESEC_HISTORY_RETENTION_DAYS", "45")
     assert gs.migrate_legacy(get_config={}.get) == ["retention"]
 
-    view = panel.render(ctx(plugin))
-    assert rows(view)[2] == [
+    view = panel.render(ctx(plugin, arg="r"))
+    assert rows(view)[0] == [
         ("Forever", "tb:s:0:settings/r.0"), ("1 year", "tb:s:0:settings/r.365"),
         ("90 days", "tb:s:0:settings/r.90"), ("• 45 days", "tb:s:0:settings/r.45"), ("30 days", "tb:s:0:settings/r.30")]
     assert panel.render(ctx(plugin, arg="r.45")).text.splitlines()[1] == "History is kept 45 days."
@@ -803,7 +818,7 @@ def test_a_migrated_value_has_its_own_choice_until_changed(gs, plugin, monkeypat
     assert panel.render(ctx(plugin, arg="r.30")).text.startswith("Keep 30 days?")
 
     assert panel.render(ctx(plugin, arg="r.90")).text.splitlines()[1] == "History is kept 90 days."
-    assert retention_labels(panel.render(ctx(plugin))) == ["Forever", "1 year", "• 90 days", "30 days"]
+    assert retention_labels(plugin) == ["Forever", "1 year", "• 90 days", "30 days"]
     panel.render(ctx(plugin, arg="r.45"))  # the old "• 45 days" button: no longer a choice
     assert gs.retention_days() == 90
 
@@ -817,8 +832,8 @@ def test_a_value_outside_the_choices_reads_naturally(gs, plugin, days, en, ru):
     top.bind_owner(plugin)
     set_retention(plugin, days)
 
-    assert en in retention_labels(plugin._settings_panel.render(ctx(plugin)))
-    assert ru in retention_labels(plugin._settings_panel.render(ctx(plugin, lang="ru")))
+    assert en in retention_labels(plugin)
+    assert ru in retention_labels(plugin, "ru")
 
 
 def test_telegram_never_overwrites_a_corrupt_file_with_retention(gs, plugin):
@@ -845,7 +860,7 @@ async def test_retention_buttons_on_the_telesec_message(gs, plugin):
     assert await top.dispatch(plugin, top.callback_update("tb:s:0:settings/r.90.yes"), bot) is True
     text, keyboard = top.last_edit(bot)
     assert text.splitlines()[1] == "History is kept 90 days."
-    assert keyboard[2][2] == ("• 90 days", "tb:s:0:settings/r.90")
+    assert keyboard[2] == [("⏳ Keep history: 90 days ›", "tb:s:0:settings/r")]
     assert gs.retention_days() == 90
 
 

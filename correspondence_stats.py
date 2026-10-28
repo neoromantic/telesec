@@ -99,9 +99,13 @@ class _Message:
     created: bool = False
     message_at: datetime | None = None
     side: str = "unknown"
-    edited: bool = False
+    edit_events: set[str] = field(default_factory=set)
     # Only the length of the latest text is kept, never the text itself.
     text_length: int | None = None
+
+    @property
+    def edited(self) -> bool:
+        return bool(self.edit_events)
 
     @property
     def at(self) -> datetime:
@@ -158,11 +162,17 @@ class ChatScan:
             # The latest known direction wins; an unknown edit never erases it.
             if side != "unknown":
                 message.side = side
-            message.edited = message.edited or event_type == "message.edited"
             text = record.get("text")
+            # Telesec's own cleanup of a transcript reply (raw text first, then edited in place) is no owner edit.
+            transcript_cleanup = record.get("edit_origin") == "transcript_cleanup"
+            if event_type == "message.edited" and not transcript_cleanup:
+                message.edit_events.add(record["event_id"])
             if isinstance(text, str):
                 # Like the direction, the latest text in file order wins.
                 message.text_length = len(text.strip())
+            return
+        if event_type == "transcript.cleanup_confirmed":
+            self.messages[key].edit_events.discard(record["edited_event_id"])
             return
         if event_type == "message.deleted":
             # A repeated event_id is the same event, so the first copy wins.

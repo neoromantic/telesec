@@ -280,7 +280,7 @@ async def test_telesec_opens_settings_then_the_notice(usage, gs, plugin):
     await settle(usage)
 
     settings, notice = bot.calls
-    assert "\nKeep history: forever\nUsage stats: on\nDossier model:" in settings["text"]
+    assert "\nUsage stats: on\nDossier model:" in settings["text"]
     assert top.keyboard(settings["reply_markup"])[-1] == SWITCH_ROW
     assert notice["text"].startswith("telesec shares usage stats") and usage.state()["notice"] == 1
 
@@ -334,7 +334,7 @@ def test_settings_names_the_variable_that_decides(usage, gs, plugin, monkeypatch
     forged = panel.render(ts.ctx(plugin, arg="u.on"))
 
     assert "Usage stats: off (set by TELESEC_TELEMETRY)" in view.text.splitlines()
-    assert ts.rows(view)[-1] != SWITCH_ROW and len(ts.rows(view)) == 4  # no switch while the variable decides
+    assert ts.rows(view)[-1] != SWITCH_ROW and len(ts.rows(view)) == 5  # no switch while the variable decides
     assert forged.text.splitlines()[1] == "Usage stats are set by TELESEC_TELEMETRY on the gateway."
     assert usage.state() == {}
 

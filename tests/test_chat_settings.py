@@ -45,12 +45,14 @@ CHAT = ttm.CHAT
 BCID = ttm.BCID
 OTHER_OWNER = 3000
 OTHER_BCID = "business-999"
-HISTORY_ROW = [("• Save history", "tb:f:991:h.on"), ("Don't save", "tb:f:991:h.off")]
-OFF_ROW = [("Save history", "tb:f:991:h.on"), ("• Don't save", "tb:f:991:h.off")]
+HISTORY_ROW = [("🗂️ History ✅", "tb:f:991:h.off")]
+OFF_ROW = [("🗂️ History ❌", "tb:f:991:h.on")]
 ERASE_ROW = [("🗑 Erase saved history", "tb:f:991:h.erase")]
-DOSSIER_ROW = [("• Keep dossier", "tb:f:991:d.on"), ("No dossier", "tb:f:991:d.off")]
-REFRESH_ROW = [("Refresh", "tb:p:991")]
-UNREADABLE = "Chat settings can't be read; history and dossiers are paused."
+DOSSIER_ROW = [("📇 Dossier ✅", "tb:f:991:d.off")]
+ALERTS_ROW = [("🔔 Deletion alerts ✅", "tb:f:991:a.off")]
+REFRESH_ROW = [("🔄 Refresh", "tb:p:991")]
+UNREADABLE = "Chat settings can't be read; history, dossiers and deletion alerts are paused."
+ALERTS_NEED_HISTORY = "Deletion alerts: need history"
 SAVE_ERROR = "Error: could not save the chat setting"
 GARBAGE = b"{not json SECRET-CONTENT"
 SCOPE_LINE = "History: off by the old server scope"
@@ -123,7 +125,7 @@ def test_store_keeps_only_off_values_and_a_chat_back_on_is_removed(cs):
         "dossier": "off", "updated_at": "2026-10-19T12:00:00Z", "updated_via": "cli"}
     assert store.set_flag(OWNER, CHAT, "dossier", True, via="cli").entry is None
     assert stored(cs) == {"version": 1, "owners": {}}
-    assert store.counts() == {"history": 0, "dossier": 0, "history_on": 0, "old_scope": 0}
+    assert store.counts() == {"history": 0, "dossier": 0, "alerts": 0, "history_on": 0, "old_scope": 0}
 
 
 def test_unknown_fields_survive_a_write(cs):
@@ -303,8 +305,8 @@ async def test_panel_shows_both_rows_in_the_transcription_style(both_on, plugin)
     assert await top.dispatch(plugin, top.start_update(), bot) is True
 
     (call,) = bot.calls
-    assert call["text"] == "Owner panel: chat 991\nTranscription: both (default)"
-    assert top.keyboard(call["reply_markup"]) == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, REFRESH_ROW]
+    assert call["text"] == "Owner panel: chat 991"
+    assert top.keyboard(call["reply_markup"]) == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, ALERTS_ROW, REFRESH_ROW]
 
 
 @pytest.mark.asyncio
@@ -317,8 +319,8 @@ async def test_dont_save_hides_the_dossier_row_and_a_double_tap_writes_nothing(b
         await tap(plugin, "tb:f:991:h.off", bot)
 
     assert bot.answers[-1] == {"callback_query_id": "query-1", "text": "History: off for this chat"}
-    assert top.last_edit(bot) == ("Owner panel: chat 991\nTranscription: both (default)\nDossier: needs history", [
-        top.MODE_ROW, [("Save history", "tb:f:991:h.on"), ("• Don't save", "tb:f:991:h.off")], REFRESH_ROW])
+    assert top.last_edit(bot) == ("Owner panel: chat 991\nDossier: needs history\nDeletion alerts: need history", [
+        top.MODE_ROW, OFF_ROW, REFRESH_ROW])
     assert stored(cs)["owners"]["1000"]["chats"]["991"]["updated_via"] == "chat"
     assert "action=f:h.off" in caplog.text
 
@@ -328,7 +330,7 @@ async def test_dont_save_hides_the_dossier_row_and_a_double_tap_writes_nothing(b
     assert bot.answers[-1]["text"] == "History: off for this chat"
 
     await tap(plugin, "tb:f:991:h.on", bot)
-    assert top.last_edit(bot)[1] == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, REFRESH_ROW]
+    assert top.last_edit(bot)[1] == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, ALERTS_ROW, REFRESH_ROW]
     assert stored(cs) == {"version": 1, "owners": {}}
 
 
@@ -341,8 +343,7 @@ async def test_no_dossier_keeps_history_on(both_on, plugin):
 
     assert bot.answers[-1]["text"] == "Dossier: off for this chat"
     assert top.last_edit(bot)[1] == [
-        top.MODE_ROW, HISTORY_ROW, [("Keep dossier", "tb:f:991:d.on"), ("• No dossier", "tb:f:991:d.off")],
-        REFRESH_ROW]
+        top.MODE_ROW, HISTORY_ROW, [("📇 Dossier ❌", "tb:f:991:d.on")], ALERTS_ROW, REFRESH_ROW]
     assert both_on.default_store().is_off(OWNER, CHAT, "dossier") is True
     assert both_on.default_store().is_off(OWNER, CHAT, "history") is False
 
@@ -363,7 +364,7 @@ async def test_reset_stays_transcription_only(both_on, plugin):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("switches", "line", "rows"), [
     ({"history": False}, "History: off in Settings", []),
-    ({"history": True, "dossiers": False}, "Dossier: off in Settings", [HISTORY_ROW]),
+    ({"history": True, "dossiers": False}, "Dossier: off in Settings", [HISTORY_ROW, ALERTS_ROW]),
 ])
 async def test_rows_hidden_by_settings_show_a_line_and_refuse_a_stale_tap(cs, plugin, switches, line, rows):
     for feature, on in switches.items():
@@ -373,7 +374,7 @@ async def test_rows_hidden_by_settings_show_a_line_and_refuse_a_stale_tap(cs, pl
     bot = top.PanelBot(business_owner_id=OWNER)
 
     assert await top.dispatch(plugin, top.start_update(), bot) is True
-    assert bot.calls[0]["text"] == f"Owner panel: chat 991\nTranscription: both (default)\n{line}"
+    assert bot.calls[0]["text"] == f"Owner panel: chat 991\n{line}"
     assert top.keyboard(bot.calls[0]["reply_markup"]) == [top.MODE_ROW, *rows, REFRESH_ROW]
 
     await tap(plugin, "tb:f:991:d.off", bot)
@@ -388,7 +389,7 @@ async def test_a_chat_the_old_scope_keeps_out_shows_dont_save_until_the_owner_sa
     bot = top.PanelBot(business_owner_id=OWNER)
 
     assert await top.dispatch(plugin, top.start_update(), bot) is True
-    assert bot.calls[0]["text"].splitlines()[2:] == [SCOPE_LINE, "Dossier: needs history"]
+    assert bot.calls[0]["text"].splitlines()[1:] == [SCOPE_LINE, "Dossier: needs history", ALERTS_NEED_HISTORY]
     assert top.keyboard(bot.calls[0]["reply_markup"]) == [top.MODE_ROW, OFF_ROW, REFRESH_ROW]
     await capture(plugin, text_update(77))
     assert test_history.load_records(plugin) == []
@@ -396,7 +397,7 @@ async def test_a_chat_the_old_scope_keeps_out_shows_dont_save_until_the_owner_sa
     await tap(plugin, "tb:f:991:h.on", bot)  # Save history: an explicit on over the rule
     assert bot.answers[-1]["text"] == "History: on for this chat"
     text, rows = top.last_edit(bot)
-    assert SCOPE_LINE not in text and rows == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, REFRESH_ROW]
+    assert SCOPE_LINE not in text and rows == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, ALERTS_ROW, REFRESH_ROW]
     assert stored(both_on)["owners"]["1000"]["chats"]["991"]["history"] == "on"
     await capture(plugin, text_update(78))
     assert len(test_history.load_records(plugin)) == 1
@@ -408,17 +409,17 @@ async def test_a_chat_the_old_scope_keeps_out_shows_dont_save_until_the_owner_sa
     await tap(plugin, "tb:f:991:h.on", bot)
     assert stored(both_on)["owners"]["1000"]["chats"]["991"]["history"] == "on"
 
-    assert plugin._owner_panel.feature_rows(CHAT, ("scope", "needs_history"), "ru")[0] == [
-        "История: выключена старой настройкой сервера", "Досье: нужна история"]
+    assert plugin._owner_panel.feature_rows(CHAT, ("scope", "needs_history", "needs_history"), "ru")[0] == [
+        "История: выключена старой настройкой сервера", "Досье: нужна история", "Уведомления об удалении: нужна история"]
 
 
 def test_a_group_chat_gets_history_but_no_dossier_row(both_on, plugin):
     chat_state = both_on.chat_state
     assert chat_state(str(OWNER), "-100123", chat_type="supergroup") == ("on", "private_only")
 
-    lines, rows = plugin._owner_panel.feature_rows(991, ("on", "private_only"))
-    assert (lines, rows) == ([], [HISTORY_ROW])
-    assert plugin._owner_panel.flag_unavailable("dossier", ("on", "private_only")) == "Dossier: private chats only"
+    lines, rows = plugin._owner_panel.feature_rows(991, ("on", "private_only", "on"))
+    assert (lines, rows) == ([], [HISTORY_ROW, ALERTS_ROW])
+    assert plugin._owner_panel.flag_unavailable("dossier", ("on", "private_only", "on")) == "Dossier: private chats only"
 
 
 @pytest.mark.asyncio
@@ -433,8 +434,8 @@ async def test_a_corrupt_file_shows_the_last_values_and_a_tap_shows_the_save_err
 
     assert bot.answers[-1]["text"] == SAVE_ERROR
     text, rows = top.last_edit(bot)
-    assert text == f"Owner panel: chat 991\n{SAVE_ERROR}\nTranscription: both (default)\nDossier: needs history"
-    assert rows[1] == [("Save history", "tb:f:991:h.on"), ("• Don't save", "tb:f:991:h.off")]
+    assert text == f"Owner panel: chat 991\n{SAVE_ERROR}\nDossier: needs history\n{ALERTS_NEED_HISTORY}"
+    assert rows[1] == OFF_ROW
     assert cs.chat_settings_path().read_bytes() == GARBAGE
     assert list(cs.chat_settings_path().parent.glob("chat-settings.json.corrupt-*")) == []
 
@@ -448,7 +449,7 @@ async def test_an_unreadable_file_on_a_cold_start_hides_both_rows(both_on, plugi
     bot = top.PanelBot(business_owner_id=OWNER)
 
     assert await top.dispatch(plugin, top.start_update(), bot) is True
-    assert bot.calls[0]["text"] == f"Owner panel: chat 991\nTranscription: both (default)\n{UNREADABLE}"
+    assert bot.calls[0]["text"] == f"Owner panel: chat 991\n{UNREADABLE}"
     assert top.keyboard(bot.calls[0]["reply_markup"]) == [top.MODE_ROW, REFRESH_ROW]
 
     await tap(plugin, "tb:f:991:h.off", bot)
@@ -466,9 +467,9 @@ async def test_panel_rows_speak_russian(both_on, plugin):
 
     assert bot.answers[-1]["text"] == "История: выключена для этого чата"
     text, rows = top.last_edit(bot)
-    assert text.endswith("\nДосье: нужна история")
-    assert rows[1:] == [[("Сохранять историю", "tb:f:991:h.on"), ("• Не сохранять", "tb:f:991:h.off")],
-                        [("📊 Статистика", "tb:s:991:stats"), ("Обновить", "tb:p:991")]]
+    assert text.endswith("\nДосье: нужна история\nУведомления об удалении: нужна история")
+    assert rows[1:] == [[("🗂️ История ❌", "tb:f:991:h.on")],
+                        [("📊 Статистика", "tb:s:991:stats"), ("🔄 Обновить", "tb:p:991")]]
 
 
 def test_flag_callbacks_parse_strictly_and_fit_64_bytes(plugin):
@@ -677,22 +678,30 @@ def test_chat_cli_sets_gets_and_lists(cs, plugin):
     test_history.set_switch(plugin, "history", True)
 
     assert ttm.run_cli(plugin, "chat", "list") == (
-        0, "No chat has history or the dossier off; every chat follows Settings.")
-    assert ttm.run_cli(plugin, "chat", "set", "991") == (1, "error: pass --history on|off, --dossier on|off, or both")
+        0, "No chat has history, the dossier or deletion alerts off; every chat follows Settings.")
+    assert ttm.run_cli(plugin, "chat", "set", "991") == (1, "error: pass --history, --dossier or --alerts on|off")
     code, out = ttm.run_cli(plugin, "chat", "set", "991", "--dossier", "off")
     assert code == 0
-    assert out.splitlines() == ["chat=991 history=on dossier=off",
+    assert out.splitlines() == ["chat=991 history=on dossier=off alerts=on",
                                 "The gateway applies it to the next update; no restart is needed."]
     code, out = ttm.run_cli(plugin, "chat", "get", "991")
-    assert code == 0 and out.startswith("chat=991 history=on dossier=off (via cli at ")
-    assert out.endswith("in effect: history=on dossier=settings")  # dossiers are off in Settings
-    assert ttm.run_cli(plugin, "chat", "list")[1].startswith("owner=1000 chat=991 history=on dossier=off via=cli ")
+    assert code == 0 and out.startswith("chat=991 history=on dossier=off alerts=on (via cli at ")
+    assert out.endswith("in effect: history=on dossier=settings alerts=on")  # dossiers are off in Settings
+    assert ttm.run_cli(plugin, "chat", "list")[1].startswith(
+        "owner=1000 chat=991 history=on dossier=off alerts=on via=cli ")
 
     got = json.loads(ttm.run_cli(plugin, "chat", "get", "991", "--format", "json")[1])
-    assert {key: got[key] for key in ("owner", "chat_id", "history", "dossier", "effective_history",
-                                      "effective_dossier", "history_state", "dossier_state")} == {
-        "owner": "1000", "chat_id": "991", "history": "on", "dossier": "off", "effective_history": "on",
-        "effective_dossier": "off", "history_state": "on", "dossier_state": "settings"}
+    assert {key: got[key] for key in ("owner", "chat_id", "history", "dossier", "alerts", "effective_history",
+                                      "effective_dossier", "effective_alerts", "history_state", "dossier_state",
+                                      "alerts_state")} == {
+        "owner": "1000", "chat_id": "991", "history": "on", "dossier": "off", "alerts": "on",
+        "effective_history": "on", "effective_dossier": "off", "effective_alerts": "on", "history_state": "on",
+        "dossier_state": "settings", "alerts_state": "on"}
+    assert ttm.run_cli(plugin, "chat", "set", "991", "--alerts", "off")[1].splitlines()[0] == (
+        "chat=991 history=on dossier=off alerts=off")
+    assert cs.default_store().is_off(OWNER, CHAT, "alerts") is True
+    assert cs.paused(BCID, CHAT, "dossier", str(OWNER)) is True and cs.paused(BCID, CHAT, "alerts", str(OWNER)) is True
+    assert ttm.run_cli(plugin, "chat", "set", "991", "--alerts", "on")[0] == 0
     listed = json.loads(ttm.run_cli(plugin, "chat", "list", "--format", "json")[1])
     assert (listed["history_enabled"], listed["dossiers_enabled"], len(listed["chats"])) == (True, False, 1)
 
@@ -768,9 +777,10 @@ def test_mode_json_and_settings_show_the_chat_switches(cs, plugin):
     got = json.loads(ttm.run_cli(plugin, "mode", "get", "991", "--format", "json")[1])
     assert (got["effective_history"], got["effective_dossier"]) == ("off", "off")
     code, out = ttm.run_cli(plugin, "settings")
-    assert code == 0 and "Chats with history off: 1; with the dossier off: 0" in out
+    assert code == 0 and "Chats with history off: 1; with the dossier off: 0; with deletion alerts off: 0" in out
     data = json.loads(ttm.run_cli(plugin, "settings", "--format", "json")[1])
-    assert data["chat_overrides"] == {"transcription": 0, "history": 1, "dossier": 0, "history_on": 0, "old_scope": 0}
+    assert data["chat_overrides"] == {"transcription": 0, "history": 1, "dossier": 0, "alerts": 0, "history_on": 0,
+                                      "old_scope": 0}
 
     cs.chat_settings_path().write_bytes(GARBAGE)
     assert "warning: chat-settings.json is unreadable" in ttm.run_cli(plugin, "settings")[1]
@@ -898,9 +908,9 @@ async def test_the_panel_follows_the_connections_the_chat_records_on(both_on, pl
     assert await top.dispatch(plugin, top.start_update(), bot) is True
     text = bot.calls[-1]["text"]
     assert SCOPE_LINE not in text and "Dossier: needs history" not in text
-    assert top.keyboard(bot.calls[-1]["reply_markup"]) == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, REFRESH_ROW]
+    assert top.keyboard(bot.calls[-1]["reply_markup"]) == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, ALERTS_ROW, REFRESH_ROW]
     await tap(plugin, "tb:f:991:h.erase.yes", bot)  # a forged tap
-    assert bot.answers[-1]["text"] == "Choose Don't save for this chat first"
+    assert bot.answers[-1]["text"] == "Turn 🗂️ History off for this chat first"
     assert len(test_history.load_records(plugin)) == 1
 
     # Save history still stores an explicit on: the chat would be kept out on the second connection.
@@ -1281,8 +1291,8 @@ async def test_erase_refuses_while_the_chat_saves_history(saved, plugin):
 
     for data in ("tb:f:991:h.erase", "tb:f:991:h.erase.yes"):  # stale buttons
         await tap(plugin, data, bot)
-        assert bot.answers[-1]["text"] == "Choose Don't save for this chat first"
-        assert top.last_edit(bot)[1] == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, REFRESH_ROW]
+        assert bot.answers[-1]["text"] == "Turn 🗂️ History off for this chat first"
+        assert top.last_edit(bot)[1] == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, ALERTS_ROW, REFRESH_ROW]
 
     assert len(test_history.load_records(plugin)) == 3
 
@@ -1298,7 +1308,7 @@ async def test_erase_never_reaches_another_owners_history_of_the_same_contact(sa
     assert ERASE_ROW not in top.keyboard(bot.calls[-1]["reply_markup"])
     assert await top.dispatch(plugin, top.callback_update("tb:f:991:h.erase.yes", from_user_id=OTHER_OWNER),
                               bot) is True
-    assert bot.answers[-1]["text"] == "Choose Don't save for this chat first"
+    assert bot.answers[-1]["text"] == "Turn 🗂️ History off for this chat first"
     assert chat_dir(plugin).exists()
 
     # The owner erases their own chat only.

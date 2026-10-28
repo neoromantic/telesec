@@ -10,12 +10,12 @@ The contact sees the dossier only when you post it: send `/dossier` in their cha
 
 Dossiers are built from history, so [turn history on](HISTORY.md#enable-capture) first. Then turn dossiers on in one of two ways:
 
-- In Telegram: send `/telesec` in your private chat with the bot (or tap **⚙️ Settings** on any chat's panel), tap **Keep dossiers**, and confirm. See [Settings](../README.md#settings).
+- In Telegram: send `/telesec` in your private chat with the bot (or tap **⚙️ Settings** on any chat's panel), tap **📇 Dossiers ❌**, and confirm. See [Settings](../README.md#settings).
 - From the terminal: `hermes telesec settings set dossiers on`, or `hermes telesec dossier enable`.
 
 All three show the same lines: the model that will receive chat text (`your main model` when the task follows it), that Hermes may retry with your main model when the Telesec dossiers task is in use, and the [message check](#message-check) and [fact extraction](#fact-extraction) when they run.
 
-No gateway restart is needed. The gateway worker checks the switch every minute, and a switch from Settings wakes it at once, so the first cycle starts within a few minutes. **No dossiers** in Settings, `hermes telesec settings set dossiers off`, or `hermes telesec dossier disable` turns dossiers off again and keeps stored dossiers. The switch is stored in `settings.json` next to the dossiers. It is the same for every Business connection in the profile, and `forget --all` keeps it. In Telegram only an owner of every Business connection the bot knows about can flip it ([In Telegram](#in-telegram)).
+No gateway restart is needed. The gateway worker checks the switch every minute, and a switch from Settings wakes it at once, so the first cycle starts within a few minutes. **📇 Dossiers ✅** in Settings, `hermes telesec settings set dossiers off`, or `hermes telesec dossier disable` turns dossiers off again and keeps stored dossiers. The switch is stored in `settings.json` next to the dossiers. It is the same for every Business connection in the profile, and `forget --all` keeps it. In Telegram only an owner of every Business connection the bot knows about can flip it ([In Telegram](#in-telegram)).
 
 While history is off, dossiers are paused: the worker runs no cycle, `status` says so, `run` refuses, and `/dossier` posts nothing. Turning history on again resumes them with no other step.
 
@@ -27,7 +27,7 @@ One switch covers every private Business chat in history. There is no per-contac
 
 ### One chat
 
-To leave one chat out, tap **Manage Bot** in that chat and then **No dossier** in your private chat with the bot, or run `hermes telesec chat set 991 --dossier off` ([per-chat history and dossier](../README.md#per-chat-history-and-dossier)). **Keep dossier** or `--dossier on` brings it back; it is the default, so nothing is stored for it. History keeps recording under No dossier, so the next cycle after Keep dossier catches up and sends what was written meanwhile to the model. A chat set to **Don't save** (no history) is paused the same way, and so is a chat the [old server scope](../README.md#moving-from-the-history-environment-variables) rule keeps out of history until its owner turns it on with **Save history**. For a paused chat:
+To leave one chat out, tap **Manage Bot** in that chat and then **📇 Dossier ✅** in your private chat with the bot, so it shows ❌, or run `hermes telesec chat set 991 --dossier off` ([per-chat history and dossier](../README.md#per-chat-history-and-dossier)). **Keep dossier** or `--dossier on` brings it back; it is the default, so nothing is stored for it. History keeps recording under No dossier, so the next cycle after Keep dossier catches up and sends what was written meanwhile to the model. A chat set to **Don't save** (no history) is paused the same way, and so is a chat the [old server scope](../README.md#moving-from-the-history-environment-variables) rule keeps out of history until its owner turns it on with **Save history**. For a paused chat:
 
 - The worker skips it, its messages are left out of the next persona rebuild, and a running panel Refresh for it stops before its next model call or write.
 - `dossier run --contact` and `dossier preview` for it refuse with `Dossier is off for this chat.`, and the panel offers no Refresh.
@@ -142,7 +142,7 @@ Messages follow the same rules as the planned correspondence insights ([#4](http
 - One message per connection, chat, and message ID, ordered by Telegram send time, with `at` in your local time.
 - Text messages only. History has no media or captions.
 - `from` is `contact`, `owner`, or `unknown` (direction not known).
-- A voice transcript the plugin posted is marked `"voice": true` and `from: unknown`: the speaker is unknown and the text may have recognition errors. Its first part starts with the plugin's `🎙️` marker; a later part of a long transcript counts as transcript too when it was sent within 10 seconds of the part before it and replies to nothing.
+- A voice transcript the plugin posted is marked `"voice": true` and `from: unknown`: the speaker is unknown and the text may have recognition errors. Its first part starts with the plugin's `🎙️` marker, and its text is the final one: the raw text Telesec posted first, or the cleaned text it put in the same message afterwards; a later part of a long transcript counts as transcript too when it was sent within 10 seconds of the part before it and replies to nothing.
 
 Each message has a short reference such as `m102`. The contact's name, username, and ids are never sent. Message text is sent as is, so a name written inside a message does reach the model.
 
@@ -240,7 +240,7 @@ The bundled `dossiers` skill gives Hermes these read, note, refresh, and forget 
 
 ### Owner panel
 
-Tap "Manage Bot" in a Business chat. The bot opens your private chat with it and shows that chat's [owner panel](../README.md#per-chat-transcription-modes). **Dossier** opens the contact's dossier there as a rich message, in your Telegram app's language (Russian, otherwise English). The contact sees nothing.
+Tap "Manage Bot" in a Business chat. The bot opens your private chat with it and shows that chat's [owner panel](../README.md#per-chat-transcription-modes). **📖 Open dossier** opens the contact's dossier there as a rich message, in your Telegram app's language (Russian, otherwise English). The contact sees nothing.
 
 <img src="images/dossier-panel-en@2x.png" width="430" alt="Screenshot of the Dossier screen in the owner panel for a fictional contact, Mira Tanaka: the update line, a one-line summary, the Project, Agreements, How to work with her, and Contact details sections, the owner note marked as not posted, and Refresh, My persona, and Back buttons.">
 
@@ -277,7 +277,7 @@ The dossier must be up to date before it goes out. When it has seen every messag
 | | The model uses your note when it writes the document. It is told not to copy or restate the note, but a fact the note gives can still be in the document, and so in the post. |
 | | When retention prunes old messages from history, the dossier keeps what it learned from them, and the post can contain it. |
 | | A deletion Telesec never recorded is unknown: it was made while the gateway was stopped (by default Hermes drops the updates that waited for it when it starts), or while history was off. A deletion of a message older than the backfill window is unknown too. |
-| | An edit Telesec never recorded is unknown, so the dossier keeps the text before it: it was made while the gateway was stopped, or while history was off, the chat was set to [Don't save](#one-chat), or the old scope rule kept the chat out. |
+| | An edit Telesec never recorded is unknown, so the dossier keeps the text before it: it was made while the gateway was stopped, or while history was off, the chat's history was [off](#one-chat), or the old scope rule kept the chat out. |
 | | A deletion or an edit in the last moment between the final check and the post is not covered. |
 | | A new message that arrives while the refresh runs is not in the post. |
 | | A message that quotes a deleted one is still in the chat, so the dossier may use it. |
@@ -292,7 +292,7 @@ The dossier must be up to date before it goes out. When it has seen every messag
 - When the send times out or loses its connection, Telegram may still have delivered the post. The bot then says the dossier may have been posted and asks you to check the chat before you send `/dossier` again, instead of saying that nothing was posted. It never retries on its own.
 - Deleting the command needs the bot's "Delete messages" permission in Telegram Business > Chatbots. Without it the command stays and the gateway log says so.
 - Once the bot confirms you as the owner, the command and the posted dossier are never written to history and never reach the ordinary Hermes path. An edited `/dossier` is never executed; when you edit a message history already has into `/dossier`, history records that edit.
-- **Erase saved history**, `history forget`, **No dossier**, or **Don't save** for the chat cancels a post in progress.
+- **Erase saved history**, `history forget`, or turning the chat's dossier or history off cancels a post in progress.
 
 <a id="source-changes"></a>
 
@@ -313,7 +313,7 @@ Edits and deletions are tracked while a message is inside the rolling backfill w
 ## Background worker
 
 - The worker runs only inside the gateway, never in CLI processes. It starts when the Telegram adapter connects, also while dossiers are off, and then only checks the switch every minute. Once dossiers are on, it waits at least 3 minutes after connect and runs a cycle. Each next cycle starts 30 minutes after the previous one ended. A cycle that finds another one running (a panel refresh or `dossier run`) retries a minute later.
-- A cycle goes through all private contacts, most recently active first, then checks the persona. Chats set to [No dossier or Don't save](#one-chat) are skipped, and their messages are left out of the persona.
+- A cycle goes through all private contacts, most recently active first, then checks the persona. Chats with their [dossier or history off](#one-chat) are skipped, and their messages are left out of the persona.
 - A contact whose history files have not changed since its last check is skipped without reading history.
 - A contact with new, edited, or deleted messages is refreshed only after its chat has been quiet for at least 10 minutes.
 - Rate limit: at most 20 dossier model calls per minute, over a sliding 60-second window that `dossier run` shares. A shorten call takes its own place in the window. Retries and fallbacks inside the host are not counted. There is no per-cycle cap, so a cycle works through every due contact at that rate.
@@ -348,7 +348,7 @@ Dossiers read history only under its read locks and never write to it. `forget` 
 
 To stop processing and delete every dossier:
 
-1. Run `hermes telesec dossier disable`, or tap **No dossiers** in Settings. No restart is needed.
+1. Run `hermes telesec dossier disable`, or tap **📇 Dossiers ✅** in Settings. No restart is needed.
 2. Run `hermes telesec dossier forget --all`.
 
 ## Configuration
