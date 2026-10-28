@@ -408,3 +408,53 @@ async def test_real_ptb_off_then_both_gates_media_download(plugin, telegram_app,
     await process(2)
     download.assert_awaited_once()
     assert core.await_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["caption", "reply"])
+@pytest.mark.parametrize("during_retry", [False, True])
+async def test_real_ptb_preserves_owner_edit_before_api_response(
+    plugin, telegram_app, monkeypatch, surface, during_retry,
+):
+    app, request = telegram_app
+    adapter = SimpleNamespace(platform="telegram", _bot=app.bot)
+    plugin._register_telegram_handlers(app, adapter)
+    message = _business_update(app, sender_id=1000, caption="Notes", voice={
+        "file_id": "v", "file_unique_id": "v", "duration": 3}).effective_message
+    if surface == "reply":
+        message = _business_update(app, sender_id=2000, voice={
+            "file_id": "v", "file_unique_id": "v", "duration": 3}).effective_message
+    original_request = request.do_request
+    writes = []
+    endpoint = "editMessageCaption" if surface == "caption" else "editMessageText"
+    field = "caption" if surface == "caption" else "text"
+    if surface == "reply":
+        request.responses[endpoint] = (200, {"ok": True, "result": True})
+
+    async def do_request(url, method, request_data=None, **kwargs):
+        called = url.rsplit("/", 1)[-1]
+        raw_call = called == endpoint if surface == "caption" else called == "sendMessage"
+        cleanup_call = called == endpoint and (surface == "reply" or len(writes) == 1)
+        if called in {endpoint, "sendMessage"}:
+            writes.append(called)
+        if (during_retry and cleanup_call) or (not during_retry and raw_call):
+            manual = Update.de_json({"update_id": 43, "edited_business_message": {
+                "message_id": 77 if surface == "caption" else 700,
+                "date": int(datetime.now(UTC).timestamp()), "business_connection_id": "business-123",
+                "chat": {"id": 991, "type": "private"},
+                "from": {"id": 1000, "is_bot": False, "first_name": "Owner"},
+                field: "Owner's own words",
+            }}, app.bot)
+            await app.process_update(manual)
+            if during_retry:
+                return 400, json.dumps({"ok": False, "description":
+                    "Bad Request: unsupported message entity type: expandable_blockquote"}).encode()
+        return await original_request(url, method, request_data=request_data, **kwargs)
+
+    monkeypatch.setattr(request, "do_request", do_request)
+    timings = {}
+    await plugin._publish_transcript(bot=app.bot, adapter=adapter, message=message,
+        transcript=test_plugin.RAW_FIRST_RAW, cleanup_fn=lambda _: test_plugin.RAW_FIRST_CLEAN,
+        llm=None, timings=timings)
+    assert len(writes) == (2 if during_retry else 1)
+    assert timings["cleanup"] == "owner_edited"

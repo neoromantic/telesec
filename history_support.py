@@ -91,7 +91,9 @@ _OWNER_CACHE: dict[str, str] = {}
 _CACHE_LOCK = threading.RLock()
 _CHAT_STATE_CACHE: dict[str, ChatStateCacheEntry] = {}
 _DELETION_TIMERS: dict[tuple[str, str], DeletionTimerEntry] = {}
-# Called with each new deletion classification and the deleted message as history saved it (None when it
+# Exact cleanup writes awaiting their Telegram echo; provenance is saved on that history event.
+_TRANSCRIPT_CLEANUPS: dict[tuple[str, str, str], str] = {}
+# Called with each pending deletion alert and the deleted message as history saved it (None when it
 # was not saved). It runs under the chat's writer lock, so it must only hand the work off. The gateway sets
 # it for deletion alerts.
 _DELETION_LISTENER: Callable[[dict[str, Any], MessageState | None], None] | None = None
@@ -149,6 +151,7 @@ class PendingDeletion:
     deleted_event: dict[str, Any] | None
     original: MessageState | None
     classification: dict[str, Any] | None = None
+    alert_handled: bool = False
 
 
 @dataclass
@@ -1963,6 +1966,10 @@ def _apply_record_to_state(state: ChatState, record: dict[str, Any]) -> None:
             pending = PendingDeletion(deleted_event=None, original=None)
             state.pending_deletions[deleted_event_id] = pending
         pending.classification = record
+    if event_type == "deletion.alert_handled":
+        pending = state.pending_deletions.get(record["deleted_event_id"])
+        if pending is not None:
+            pending.alert_handled = True
 
 
 def _build_chat_state(records: Iterable[dict[str, Any]]) -> ChatState:
@@ -2166,6 +2173,8 @@ def _sync_pending_deletions_for_chat(
     appended = 0
     for deleted_event_id, pending in list(state.pending_deletions.items()):
         if pending.classification is not None:
+            if pending.classification.get("alert_pending") and not pending.alert_handled:
+                _notify_deletion_listener(pending.classification, pending.original)
             _cancel_deletion_timer(chat_dir, deleted_event_id)
             continue
         deleted_event = pending.deleted_event
@@ -2185,9 +2194,12 @@ def _sync_pending_deletions_for_chat(
         )
         if record is None:
             continue
+        record["alert_pending"] = (record["direction"] == "inbound"
+                                   and record["classification"] not in {"likely_correction", "likely_duplicate"})
         if _append_record_to_state(chat_dir, state, record, appended_records=appended_records):
             appended += 1
-            _notify_deletion_listener(record, pending.original)
+            if record["alert_pending"]:
+                _notify_deletion_listener(record, pending.original)
         _cancel_deletion_timer(chat_dir, deleted_event_id)
     return appended
 
@@ -2195,6 +2207,14 @@ def _sync_pending_deletions_for_chat(
 def set_deletion_listener(listener: Callable[[dict[str, Any], MessageState | None], None] | None) -> None:
     global _DELETION_LISTENER
     _DELETION_LISTENER = listener
+    if listener is not None:
+        for chat_dir in _iter_chat_dirs():
+            with _root_writer_lock(), _chat_writer_lock(chat_dir):
+                state, _ = _load_chat_state(chat_dir, repair_tails=False)
+                for pending in state.pending_deletions.values():
+                    if (pending.classification is not None and pending.classification.get("alert_pending")
+                            and not pending.alert_handled):
+                        _notify_deletion_listener(pending.classification, pending.original)
 
 
 def _notify_deletion_listener(record: dict[str, Any], original: MessageState | None) -> None:
@@ -3110,6 +3130,10 @@ async def _capture_update(update: Any, *, bot: Any, current: datetime, direction
         message_date = _normalize_timestamp(_get(payload, "date"))
         chat_profile = _extract_chat_profile(payload)
         sender_profile = _extract_sender_profile(payload)
+        cleanup_key = (str(business_connection_id), str(chat_id), str(_get(payload, "message_id")))
+        automatic_edit = event_type == "message.edited" and _TRANSCRIPT_CLEANUPS.get(cleanup_key) == text
+        if automatic_edit:
+            _TRANSCRIPT_CLEANUPS.pop(cleanup_key)
 
         def _mutate_message(state: ChatState, appended_records: list[dict[str, Any]]) -> bool:
             if command_edit and str(_get(payload, "message_id")) not in state.messages:
@@ -3130,6 +3154,8 @@ async def _capture_update(update: Any, *, bot: Any, current: datetime, direction
                 chat_profile=chat_profile,
                 sender_profile=sender_profile,
             )
+            if automatic_edit:
+                record["edit_origin"] = "transcript_cleanup"
             wrote_record = _append_record_to_state(chat_dir, state, record, appended_records=appended_records)
             wrote_classifications = _sync_pending_deletions_for_chat(
                 chat_dir,

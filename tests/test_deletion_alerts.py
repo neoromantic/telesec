@@ -61,7 +61,8 @@ async def _delete(module, bot, *, text: str, from_user_id: int = 2000, then: str
 async def _settle() -> None:
     """Wait for the alerts the history listener scheduled on this loop."""
     await asyncio.sleep(0)
-    await asyncio.gather(*(task for task in asyncio.all_tasks() if task is not asyncio.current_task()))
+    while tasks := [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]:
+        await asyncio.gather(*tasks)
 
 
 def _buttons(call: dict) -> list[tuple[str, str | None, str | None]]:
@@ -171,3 +172,101 @@ def test_should_alert_only_for_a_contacts_unexplained_deletion(plugin):
     assert not should({"direction": "inbound", "classification": "likely_duplicate"})
     assert not should({"direction": "outbound", "classification": "unexplained"})
     assert not should({"direction": "unknown", "classification": "unclassifiable"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("listener_present", [False, True])
+@pytest.mark.parametrize("due_at_startup", [False, True])
+async def test_restart_and_terminal_maintenance_preserve_pending_delivery(
+    enabled_history, listener_present, due_at_startup, monkeypatch,
+):
+    from test_history import load_records
+
+    module, bot = enabled_history, AlertBot()
+    history, alerts = module._history_support, module._deletion_alerts
+    alerts.register_strings()
+    observe = history.observe_ptb_update
+    await observe(make_business_text_update(text="Meet at the north gate", message_id=77, update_id=1,
+                                           date=BASE), bot=bot, now=BASE)
+    await observe(make_deleted_update(message_ids=(77,), update_id=2), bot=bot, now=BASE + timedelta(seconds=2))
+    history.reset_in_memory_caches()
+    history.set_deletion_listener(None)
+    if listener_present:
+        history.set_deletion_listener(alerts.on_classified)
+    startup = BASE + timedelta(seconds=30 if due_at_startup else 5)
+    history.run_startup_maintenance(now=startup)
+    assert bot.sent == []
+    history.set_deletion_listener(alerts.on_classified)
+    monkeypatch.setattr(history, "_utcnow", lambda: startup)
+    # The gateway factory binds transport before receiving any update.
+    module._register_telegram_handlers(SimpleNamespace(bot=bot, add_handler=lambda *a, **kw: None),
+                                      SimpleNamespace(platform="telegram", _bot=bot))
+    await _settle()
+    if not due_at_startup:
+        # Exercise the restored timer directly at its deadline, without sleeping or Business traffic.
+        chat_dir = history._history_chat_dir_path("business-123", 991)
+        deleted = next(r for r in load_records(module) if r["event_type"] == "message.deleted")
+        history._run_scheduled_deletion_timer(str(chat_dir.resolve()), deleted["event_id"],
+                                             history._isoformat_utc(BASE + timedelta(seconds=12)))
+        await _settle()
+    assert len(bot.sent) == 1
+    assert len([r for r in load_records(module) if r["event_type"] == "deletion.alert_handled"]) == 1
+    history.reset_in_memory_caches()
+    alerts._bot = alerts._loop = None
+    alerts.bind(bot)
+    await _settle()
+    assert len(bot.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_upgrade_classifications_are_not_replayed(enabled_history):
+    module, bot = enabled_history, AlertBot()
+    history = module._history_support
+    chat_dir = history._history_chat_dir("business-123", 991)
+    record = history._build_event(event_type="deletion.classified", source="deleted_business_messages",
+        observed_at=BASE, telegram_update_id=1, business_connection_id="business-123", chat_id=991,
+        message_id=77, message_at=BASE, sender_id=2000, direction="inbound", reply_to_message_id=None,
+        deleted_event_id="old-deletion", classification="unexplained")
+    history._append_record(chat_dir, record)
+    history.set_deletion_listener(module._deletion_alerts.on_classified)
+    module._deletion_alerts.bind(bot)
+    await _settle()
+    assert bot.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rejected", [False, True])
+async def test_actual_cleanup_echo_saves_provenance_but_owner_edit_counts(enabled_history, rejected):
+    from test_history import load_records
+    from test_plugin import RAW_FIRST_CLEAN, RAW_FIRST_RAW, _raw_first_setup
+
+    module = enabled_history
+    message, event, bot, gateway = _raw_first_setup()
+    observe = module._history_support.observe_ptb_update
+    await observe(make_business_text_update(text="🎙️ " + RAW_FIRST_RAW, from_user_id=1000,
+        message_id=500, update_id=1, date=BASE), bot=bot, now=BASE)
+
+    async def edit(**kwargs):
+        if rejected:
+            raise RuntimeError("message can not be edited")
+        await observe(make_business_text_update(text=kwargs["text"], message_id=500, update_id=2,
+            from_user_id=1000, edited=True, date=BASE), bot=bot, now=BASE + timedelta(seconds=1))
+        return True
+
+    bot.edit_message_text = edit
+    await module._publish_transcript(bot=bot, adapter=gateway.adapters[event.source.platform], message=message,
+        transcript=RAW_FIRST_RAW, cleanup_fn=lambda _: RAW_FIRST_CLEAN, llm=None)
+    records = load_records(module)
+    if not rejected:
+        assert records[-1]["edit_origin"] == "transcript_cleanup"
+    scan = module.correspondence_stats.ChatScan("business-123", "991")
+    for ordinal, record in enumerate(records):
+        scan.consume(record, ordinal)
+    assert not scan.messages["500"].edited
+    # Even a manual revision identical to a rejected cleanup is an owner edit.
+    await observe(make_business_text_update(text="🎙️ " + RAW_FIRST_CLEAN, message_id=500, update_id=3,
+        from_user_id=1000, edited=True, date=BASE), bot=bot, now=BASE + timedelta(seconds=2))
+    scan = module.correspondence_stats.ChatScan("business-123", "991")
+    for ordinal, record in enumerate(load_records(module)):
+        scan.consume(record, ordinal)
+    assert scan.messages["500"].edited

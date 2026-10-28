@@ -431,10 +431,9 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
             # ordinary update for the same message already reaches Hermes.
             raise ApplicationHandlerStop
         try:
-            _deletion_alerts.bind(context.bot)
             _deletion_alerts.note_language(_get(getattr(update, "effective_message", None), "from_user"))
         except Exception as exc:  # noqa: BLE001 - bookkeeping must not break dispatch
-            logger.debug("%s: deletion alert binding failed (%s)", _PLUGIN_NAME, type(exc).__name__)
+            logger.debug("%s: deletion alert language note failed (%s)", _PLUGIN_NAME, type(exc).__name__)
         try:
             _note_transcript_target_edit(update)
             _note_business_update_chat(update)
@@ -524,7 +523,7 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
         def check_update(self, update: Any) -> bool:
             return getattr(update, "business_connection", None) is not None
 
-    _history_support.set_deletion_listener(_deletion_alerts.on_classified)
+    _deletion_alerts.bind(adapter._bot)
     app.add_handler(BusinessHandler(on_business_update, block=True), group=_RAW_HISTORY_HANDLER_GROUP)
     app.add_handler(OwnerPanelHandler(on_owner_panel_update, block=True), group=_RAW_HISTORY_HANDLER_GROUP)
     app.add_handler(
@@ -1338,6 +1337,9 @@ async def _try_attach_transcript_caption(*, bot: Any, message: Any, transcript: 
         "caption_entities": caption_entities,
         "business_connection_id": business_connection_id,
     }
+    key = _transcript_target_key(message, message_id)
+    if key in _PENDING_TRANSCRIPTS and not _PENDING_TRANSCRIPTS[key]:
+        return TranscriptCaptionOutcome.ATTACHED
     try:
         result = await bot.edit_message_caption(**kwargs)
     except Exception as exc:  # noqa: BLE001 - edit failures need explicit duplicate-safe classification
@@ -1356,6 +1358,8 @@ async def _try_attach_transcript_caption(*, bot: Any, message: Any, transcript: 
             **kwargs,
             "caption_entities": tuple(_get(message, "caption_entities") or ()),
         }
+        if key in _PENDING_TRANSCRIPTS and not _PENDING_TRANSCRIPTS[key]:
+            return TranscriptCaptionOutcome.ATTACHED
         try:
             result = await bot.edit_message_caption(**plain_kwargs)
         except Exception as fallback_exc:  # noqa: BLE001 - only definite rejection may fall back to reply
@@ -1750,6 +1754,8 @@ def _resolve_transcriber(
 # shows it -> the texts Telesec set there. Any other edit is the owner's own: it empties the set, and the
 # cleanup then leaves the message alone. In memory only: after a restart the raw text simply stays.
 _PENDING_TRANSCRIPTS: dict[tuple[str, str, str], set[str]] = {}
+# Replies acquire their target id only after sendMessage returns. Keep observed cancellations meanwhile.
+_PENDING_TRANSCRIPT_REPLIES: dict[tuple[str, str, str], tuple[str, set[str]]] = {}
 
 
 def _transcript_target_key(message: Any, message_id: Any) -> tuple[str, str, str]:
@@ -1761,9 +1767,14 @@ def _note_transcript_target_edit(update: Any) -> None:
     payload = getattr(update, "edited_business_message", None)
     if payload is None:
         return
-    expected = _PENDING_TRANSCRIPTS.get(_transcript_target_key(payload, _get(payload, "message_id")))
-    if expected and str(_get(payload, "caption") or _get(payload, "text") or "").strip() not in expected:
+    key = _transcript_target_key(payload, _get(payload, "message_id"))
+    text = str(_get(payload, "caption") or _get(payload, "text") or "").strip()
+    expected = _PENDING_TRANSCRIPTS.get(key)
+    if expected and text not in expected:
         expected.clear()
+    for source, (raw, cancelled) in _PENDING_TRANSCRIPT_REPLIES.items():
+        if source[:2] == key[:2] and text != raw:
+            cancelled.add(key[2])
 
 
 def _timing_mark(timings: dict[str, Any] | None, name: str, value: Any = None) -> None:
@@ -1800,7 +1811,15 @@ async def _edit_transcript_in_place(*, bot: Any, message: Any, surface: str, tar
         edit = bot.edit_message_text
         attempts = ({**common, "text": text, "entities": (_expandable_blockquote_entity(text),)},
                     {**common, "text": text})
+    key = _transcript_target_key(message, target_id)
     for index, kwargs in enumerate(attempts):
+        if not _PENDING_TRANSCRIPTS.get(key):
+            _history_support._TRANSCRIPT_CLEANUPS.pop(key, None)
+            return "owner_edited"
+        if surface == "reply":
+            _history_support._TRANSCRIPT_CLEANUPS[key] = kwargs["text"]
+            while len(_history_support._TRANSCRIPT_CLEANUPS) > 512:
+                _history_support._TRANSCRIPT_CLEANUPS.pop(next(iter(_history_support._TRANSCRIPT_CLEANUPS)))
         try:
             result = await edit(**kwargs)
         except Exception as exc:  # noqa: BLE001 - a failed edit leaves the raw text, never a second transcript
@@ -1809,10 +1828,14 @@ async def _edit_transcript_in_place(*, bot: Any, message: Any, surface: str, tar
                 return "edited"
             if outcome is CaptionEditAttemptOutcome.UNSUPPORTED_ENTITY and index == 0:
                 continue
+            _history_support._TRANSCRIPT_CLEANUPS.pop(key, None)
             logger.info("%s: cleaned transcript edit failed; the raw text stays (%s)", _PLUGIN_NAME,
                         type(exc).__name__)
             return "edit_failed"
-        return "edited" if result is not False else "edit_failed"
+        if result is False:
+            _history_support._TRANSCRIPT_CLEANUPS.pop(key, None)
+            return "edit_failed"
+        return "edited"
     return "edit_failed"
 
 
@@ -1849,23 +1872,34 @@ async def _publish_transcript(
         _timing_mark(timings, "first_visible")
         return final_text, caption_outcome
 
-    caption_outcome = await _try_attach_transcript_caption(bot=bot, message=message, transcript=raw)
-    if caption_outcome is TranscriptCaptionOutcome.REPLY_FALLBACK:
-        sent = await _send_transcript_messages(
-            bot=bot, adapter=adapter, message=message, texts=_format_transcript_messages(raw)
-        )
-        surface, target_id = "reply", _get(sent[0] if sent else None, "message_id")
-        visible = _format_transcript_messages(raw)[0]
-    else:
-        surface, target_id = "caption", _get(message, "message_id")
-        visible = _build_transcript_caption(message, raw) or ""
+    source_key = _transcript_target_key(message, _get(message, "message_id"))
+    caption = _build_transcript_caption(message, raw)
+    if caption is not None:
+        _PENDING_TRANSCRIPTS[source_key] = {caption.strip()}
+    raw_reply = _format_transcript_messages(raw)[0]
+    cancelled: set[str] = set()
+    _PENDING_TRANSCRIPT_REPLIES[source_key] = (raw_reply.strip(), cancelled)
+    try:
+        caption_outcome = await _try_attach_transcript_caption(bot=bot, message=message, transcript=raw)
+        if caption_outcome is TranscriptCaptionOutcome.REPLY_FALLBACK:
+            _PENDING_TRANSCRIPTS.pop(source_key, None)
+            sent = await _send_transcript_messages(
+                bot=bot, adapter=adapter, message=message, texts=[raw_reply]
+            )
+            surface, target_id = "reply", _get(sent[0], "message_id")
+            key = _transcript_target_key(message, target_id)
+            _PENDING_TRANSCRIPTS[key] = {raw_reply.strip()}
+            if str(target_id) in cancelled:
+                _PENDING_TRANSCRIPTS[key].clear()
+        else:
+            surface, target_id = "caption", _get(message, "message_id")
+            key = source_key
+    except BaseException:
+        _PENDING_TRANSCRIPTS.pop(source_key, None)
+        raise
+    finally:
+        _PENDING_TRANSCRIPT_REPLIES.pop(source_key, None)
     _timing_mark(timings, "first_visible")
-    if target_id is None:
-        _timing_mark(timings, "cleanup", "no_target")
-        return raw, caption_outcome
-
-    key = _transcript_target_key(message, target_id)
-    _PENDING_TRANSCRIPTS[key] = {visible.strip()}
     try:
         cleaned = (await _cleanup_transcript(raw, llm=llm, cleanup_fn=cleanup_fn)).strip()
         _timing_mark(timings, "cleanup_done")

@@ -111,7 +111,7 @@ Rules:
 hermes telesec history deletions --status unexplained --limit 20
 ```
 
-Edits append the full updated text. Deletions append a tombstone while preserving earlier text. After the correction window, a deterministic classification is appended:
+Edits append the full updated text. An observed edit matching an automatic transcript cleanup carries `edit_origin: transcript_cleanup`; stats exclude that edit while counting manual revisions, including those starting with 🎙️. Deletions append a tombstone while preserving earlier text. After the correction window, a deterministic classification is appended:
 
 | Classification | Meaning |
 |---|---|
@@ -120,7 +120,7 @@ Edits append the full updated text. Deletions append a tombstone while preservin
 | `unexplained` | No strong replacement evidence. |
 | `unclassifiable` | Original text or sender evidence was unavailable. |
 
-These are observable text-similarity categories, not judgments about a person's intent. Delayed classification runs in the gateway and recovers overdue work at startup. Notifications about deletions are planned separately.
+These are observable text-similarity categories, not judgments about a person's intent. Delayed classification runs in the gateway and recovers overdue work at startup. [Deletion alerts](../README.md#deletion-alerts) notify the owner about unexplained peer deletions. New eligible classifications carry `alert_pending`; a separate `deletion.alert_handled` event records delivery or an explicit disabled switch. Startup and terminal maintenance preserve pending delivery, and the gateway resumes it without another Business update. Historical classifications without `alert_pending` do not create a backlog.
 
 ## Configuration
 

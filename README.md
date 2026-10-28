@@ -41,7 +41,7 @@ Voice cleanup: gemini / gemini-3.8-flash
 [🔔 Deletion alerts ✅]
 ```
 
-Each feature is one button with its emoji and state: tap ✅ to turn it off, ❌ to turn it on. The screenshot below shows the 0.16 layout, with two buttons per switch; it is retaken after the 0.17.0 deploy.
+Each feature is one button with its emoji and state: tap ✅ to turn it off, ❌ to turn it on. The screenshot below is historical (0.16); the current controls are shown above. Updated Telegram captures are required before release.
 
 ![Real Telegram screenshot of the 0.16 Settings in the owner's private chat with the bot: "Telesec settings · all chats", Keep history: forever, the dossier and voice cleanup models, then the Transcribe / Don't transcribe, Save history / Don't save, Forever / 1 year / 90 days / 30 days, and Keep dossiers / No dossiers rows, with transcription, history, and dossiers on and history kept forever.](docs/images/settings.png)
 
@@ -114,7 +114,7 @@ both: yours and the contact's · own: only yours · peer: only the contact's · 
 [« Back]
 ```
 
-The screenshot below shows the 0.16 layout, with mode and switch rows; it is retaken after the 0.17.0 deploy.
+The screenshot below is historical (0.16); the current controls are described above. Updated Telegram captures are required before release.
 
 ![Real Telegram screenshot of the 0.16 owner panel in the owner's private chat with the bot: Transcription: off, with mode buttons, Reset to default, the Save history / Don't save and Keep dossier / No dossier rows (both on), Stats, Dossier, ⚙️ Settings, and Refresh. The contact's name, username, and chat ID are blurred.](docs/images/owner-panel.png)
 
@@ -244,10 +244,10 @@ Unexplained: no later message replaced it.
 
 - **Quiet by design.** History waits about two minutes after a deletion, then classifies it. A likely correction (deleted and sent again with a small change) or a likely duplicate (the same text sent again) sends nothing, and neither does a deletion of your own message.
 - **Text on request.** The alert names the contact and the class, never the text. **👁 Show text** adds the deleted text to the alert as a quote, read from history at that moment; after an erase it says `The text is no longer saved`. **Chat panel** opens that chat's [owner panel](#per-chat-transcription-modes).
-- **Once.** The classification is stored in history, so an alert is never repeated, also not after a restart.
+- **Once.** Classification and alert delivery are stored separately in history. The gateway resumes pending alerts at startup without another Business message. A successful delivery is not replayed after restart, and older classifications without pending-delivery evidence are not replayed.
 - **Off switches.** **🔔 Deletion alerts** in [Settings](#settings) turns alerts off for all chats, and the same button in a chat's panel for that chat, or `hermes telesec settings set alerts off` and `hermes telesec chat set 991 --alerts off`. Alerts need history and pause while it is off.
 
-Alerts speak Russian after you use the bot with a Russian Telegram app (`🔔 Удалённое сообщение`). Alert taps never reach the Hermes agent. Telesec classifies a deletion when a timer fires or the next message arrives; a deletion classified by `hermes telesec history` maintenance in a terminal, rather than by the gateway, sends no alert. `hermes telesec history deletions --status unexplained` lists the same deletions ([history](docs/HISTORY.md)).
+Alerts speak Russian after you use the bot with a Russian Telegram app (`🔔 Удалённое сообщение`). Alert taps never reach the Hermes agent. Telesec classifies a deletion when its timer fires or maintenance runs. A classification made during startup or terminal maintenance keeps its pending alert for the gateway to deliver. `hermes telesec history deletions --status unexplained` lists the same deletions ([history](docs/HISTORY.md)).
 
 ## Correspondence stats
 

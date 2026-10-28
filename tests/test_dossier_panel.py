@@ -1429,7 +1429,7 @@ async def test_a_failure_inside_the_post_is_told_and_logged_by_type_only(plug, d
 def _business_handler(plug: ModuleType) -> Any:
     handlers: list[tuple[Any, int]] = []
     plug._register_telegram_handlers(SimpleNamespace(add_handler=lambda h, group: handlers.append((h, group))),
-                                     SimpleNamespace(platform="telegram"))
+                                     SimpleNamespace(platform="telegram", _bot=PanelBot()))
     (handler,) = [h for h, _group in handlers if type(h).__name__ == "BusinessHandler"]
     return handler
 

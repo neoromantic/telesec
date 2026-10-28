@@ -3,7 +3,8 @@
 History classifies each deletion about two minutes after Telegram reports it (``history_support``). A
 deletion explained by a later message, a likely correction or a likely duplicate, stays quiet, and so does
 a deletion of the owner's own message. Any other deletion of the contact's message sends one alert: the
-classification is stored once, so a restart never repeats it. The alert names the contact and the class;
+delivery is stored in history, so a restart never repeats a successful alert. The alert names the contact
+and the class;
 the deleted text shows only when the owner taps "Show text", read from history at that moment.
 
 Alerts are on by default, need history (deletions are found in saved history), and can be turned off in
@@ -50,6 +51,7 @@ STRINGS = {
 
 _loop: asyncio.AbstractEventLoop | None = None
 _bot: Any = None
+_in_flight: set[str] = set()
 # Telegram user id -> the client language last seen for that user, so an alert speaks the owner's language.
 _languages: dict[str, str] = {}
 
@@ -59,9 +61,10 @@ def register_strings() -> None:
 
 
 def bind(bot: Any) -> None:
-    """Remember the gateway's bot and event loop; called from a Business update handler."""
+    """Bind the initialized gateway and replay pending delivery without new Business traffic."""
     global _loop, _bot
     _loop, _bot = asyncio.get_running_loop(), bot
+    _loop.create_task(asyncio.to_thread(_history.set_deletion_listener, on_classified))
 
 
 def note_language(user: Any) -> None:
@@ -83,6 +86,10 @@ def on_classified(record: dict[str, Any], original: Any) -> None:
     loop, bot = _loop, _bot
     if loop is None or bot is None or loop.is_closed() or not should_alert(record):
         return
+    event_id = record["event_id"]
+    if event_id in _in_flight:
+        return
+    _in_flight.add(event_id)
     asyncio.run_coroutine_threadsafe(send(bot, record, has_text=bool(original is not None and original.text)), loop)
 
 
@@ -136,18 +143,32 @@ async def send(bot: Any, record: dict[str, Any], *, has_text: bool) -> None:
         if owner is None:
             logger.info("%s: deletion alert skipped, owner unknown (%s)", _history.PLUGIN_NAME, reason)
             return
-        if not _settings.alerts_active() or await asyncio.to_thread(
+        if _settings.alerts_active() and not await asyncio.to_thread(
             _chat_settings.paused, connection, chat, "alerts", owner
         ):
-            return
-        label = await asyncio.to_thread(_chat_label, connection, chat)
-        text, rows = render(record, label, has_text=has_text, language_code=_languages.get(owner),
-                            bot_username=_bot_username(bot))
-        await bot.send_message(chat_id=int(owner), text=text, reply_markup=markup(rows))
-        logger.info("%s: deletion alert sent chat=%s class=%s", _history.PLUGIN_NAME, _history._safe_part(chat),
-                    record.get("classification"))
+            label = await asyncio.to_thread(_chat_label, connection, chat)
+            text, rows = render(record, label, has_text=has_text, language_code=_languages.get(owner),
+                                bot_username=_bot_username(bot))
+            await bot.send_message(chat_id=int(owner), text=text, reply_markup=markup(rows))
+            logger.info("%s: deletion alert sent chat=%s class=%s", _history.PLUGIN_NAME, _history._safe_part(chat),
+                        record.get("classification"))
+        chat_dir = _history._history_chat_dir_path(connection, chat)
+
+        def mark_handled(state: Any, appended: list[dict[str, Any]]) -> None:
+            pending = state.pending_deletions.get(record["deleted_event_id"])
+            if pending is None or pending.alert_handled:
+                return
+            handled = {**record, "event_type": "deletion.alert_handled", "observed_at": _history._isoformat_utc(_history._utcnow())}
+            handled.pop("alert_pending")
+            handled["event_id"] = _history._event_id(handled)
+            _history._append_record_to_state(chat_dir, state, handled, appended_records=appended)
+
+        await asyncio.to_thread(_history._mutate_chat_history_transactionally, chat_dir,
+                                dirty_reason="alert_delivery_refresh_failed", mutate=mark_handled)
     except Exception as exc:  # noqa: BLE001 - a lost alert must not break anything else
         logger.warning("%s: deletion alert failed (%s)", _history.PLUGIN_NAME, type(exc).__name__)
+    finally:
+        _in_flight.discard(record["event_id"])
 
 
 def saved_text(connections: tuple[str, ...], chat_id: str, message_id: str) -> str | None:

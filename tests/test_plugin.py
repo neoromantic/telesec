@@ -2355,3 +2355,69 @@ async def test_a_raw_transcript_longer_than_one_message_is_still_cleaned_first(p
     assert len(bot.delivered_calls) > 1
     assert bot.delivered_calls[0]["text"].startswith(f"🎙️ {RAW_FIRST_CLEAN}")
     assert bot.text_edit_calls == []
+
+
+@pytest.mark.asyncio
+async def test_manual_caption_edit_before_raw_request_returns_is_preserved(plugin):
+    module = plugin
+    message, event, bot, gateway = _raw_first_setup(from_user_id=1000, caption="Notes")
+    visible = None
+    edits = []
+    async def edit_caption(**kwargs):
+        nonlocal visible
+        edits.append(kwargs)
+        visible = kwargs['caption']
+        if len(edits) == 1:
+            # Telegram applied raw, then owner edited, while the API response is still pending.
+            visible = "Owner's revised caption"
+            module._note_transcript_target_edit(SimpleNamespace(edited_business_message=SimpleNamespace(
+                business_connection_id="business-123", chat=SimpleNamespace(id=991),
+                message_id=message.message_id, text=None, caption=visible)))
+        return True
+    bot.edit_message_caption = edit_caption
+    await module._publish_transcript(bot=bot, adapter=gateway.adapters[event.source.platform], message=message,
+        transcript=RAW_FIRST_RAW, cleanup_fn=lambda _: RAW_FIRST_CLEAN, llm=None)
+    assert visible == "Owner's revised caption", "Cleanup overwrote an owner edit observed before raw request returned"
+
+
+@pytest.mark.asyncio
+async def test_owner_edit_during_rejected_cleanup_request_prevents_plain_retry(plugin):
+    module = plugin
+    message, event, bot, gateway = _raw_first_setup()
+    edits = []
+    visible = None
+    async def edit_text(**kwargs):
+        nonlocal visible
+        edits.append(kwargs)
+        if len(edits) == 1:
+            visible = "Owner's own words"
+            module._note_transcript_target_edit(SimpleNamespace(edited_business_message=SimpleNamespace(
+                business_connection_id="business-123", chat=SimpleNamespace(id=991), message_id=500,
+                caption=None, text=visible)))
+            raise RuntimeError("unsupported message entity type: expandable_blockquote")
+        visible = kwargs['text']
+        return True
+    bot.edit_message_text = edit_text
+    await module._publish_transcript(bot=bot, adapter=gateway.adapters[event.source.platform], message=message,
+        transcript=RAW_FIRST_RAW, cleanup_fn=lambda _: RAW_FIRST_CLEAN, llm=None)
+    assert visible == "Owner's own words", "Plain retry ignored already observed cancellation and overwrote owner edit"
+
+
+@pytest.mark.asyncio
+async def test_owner_reply_edit_before_send_returns_is_preserved(plugin):
+    message, event, bot, gateway = _raw_first_setup()
+    original_send = bot.send_message
+
+    async def send(**kwargs):
+        result = await original_send(**kwargs)
+        plugin._note_transcript_target_edit(SimpleNamespace(edited_business_message=SimpleNamespace(
+            business_connection_id="business-123", chat=SimpleNamespace(id=991),
+            message_id=result.message_id, text="Owner's revised reply", caption=None)))
+        return result
+
+    bot.send_message = send
+    timings = {}
+    await plugin._publish_transcript(bot=bot, adapter=gateway.adapters[event.source.platform], message=message,
+        transcript=RAW_FIRST_RAW, cleanup_fn=lambda _: RAW_FIRST_CLEAN, llm=None, timings=timings)
+    assert bot.text_edit_calls == []
+    assert timings["cleanup"] == "owner_edited"
