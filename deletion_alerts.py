@@ -164,7 +164,7 @@ async def send(bot: Any, record: dict[str, Any], *, has_text: bool) -> None:
             _history._append_record_to_state(chat_dir, state, handled, appended_records=appended)
 
         await asyncio.to_thread(_history._mutate_chat_history_transactionally, chat_dir,
-                                dirty_reason="alert_delivery_refresh_failed", mutate=mark_handled)
+                                dirty_reason="alert_delivery_refresh_failed", mutate=mark_handled, existing_only=True)
     except Exception as exc:  # noqa: BLE001 - a lost alert must not break anything else
         logger.warning("%s: deletion alert failed (%s)", _history.PLUGIN_NAME, type(exc).__name__)
     finally:

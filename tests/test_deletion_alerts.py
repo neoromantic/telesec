@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -270,3 +272,50 @@ async def test_actual_cleanup_echo_saves_provenance_but_owner_edit_counts(enable
     for ordinal, record in enumerate(load_records(module)):
         scan.consume(record, ordinal)
     assert scan.messages["500"].edited
+
+
+@pytest.mark.asyncio
+async def test_listener_replay_and_erase_cannot_recreate_a_chat(enabled_history, monkeypatch):
+    module, bot = enabled_history, AlertBot()
+    history = module._history_support
+    await history.observe_ptb_update(make_business_text_update(text="Made-up appointment", date=BASE),
+                                     bot=bot, now=BASE)
+    chat_dir = history._history_chat_dir_path("business-123", 991)
+    iter_dirs = history._iter_chat_dirs
+    listed, proceed = threading.Event(), threading.Event()
+
+    def paused_listing():
+        for path in iter_dirs():
+            listed.set()
+            assert proceed.wait(2)
+            yield path
+
+    monkeypatch.setattr(history, "_iter_chat_dirs", paused_listing)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        replay = pool.submit(history.set_deletion_listener, lambda record, original: None)
+        assert listed.wait(2)
+        erase = pool.submit(history.erase_chat_history, "business-123", 991)
+        try:
+            with pytest.raises(TimeoutError):
+                erase.result(timeout=0.05)
+        finally:
+            proceed.set()
+        replay.result(timeout=2)
+        erase.result(timeout=2)
+    assert not chat_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_alert_acknowledgement_does_not_recreate_erased_history(alerts):
+    bot = AlertBot()
+    send = bot.send_message
+
+    async def send_then_erase(**kwargs):
+        result = await send(**kwargs)
+        alerts._history_support.erase_chat_history("business-123", 991)
+        return result
+
+    bot.send_message = send_then_erase
+    await _delete(alerts, bot, text="Made-up appointment at the north gate")
+    assert len(bot.sent) == 1
+    assert not alerts._history_support._history_chat_dir_path("business-123", 991).exists()

@@ -1898,10 +1898,13 @@ def _mutate_chat_history_transactionally(
     *,
     dirty_reason: str,
     mutate: Callable[[ChatState, list[dict[str, Any]]], MutationResult],
-) -> tuple[MutationResult, Exception | None, Exception | None]:
+    existing_only: bool = False,
+) -> tuple[MutationResult | None, Exception | None, Exception | None]:
     # Production canonical writers must hold root before chat so every append and
     # its derived catalog publish/dirty handling become one root-scoped commit.
     with _root_writer_lock():
+        if existing_only and not chat_dir.exists():
+            return None, None, None
         base_source_signature = _history_source_signature_locked(chat_lock=_chat_writer_lock)
         catalog_records: list[dict[str, Any]] = []
         with _chat_writer_lock(chat_dir):
@@ -2207,14 +2210,15 @@ def _sync_pending_deletions_for_chat(
 def set_deletion_listener(listener: Callable[[dict[str, Any], MessageState | None], None] | None) -> None:
     global _DELETION_LISTENER
     _DELETION_LISTENER = listener
-    if listener is not None:
-        for chat_dir in _iter_chat_dirs():
-            with _root_writer_lock(), _chat_writer_lock(chat_dir):
-                state, _ = _load_chat_state(chat_dir, repair_tails=False)
-                for pending in state.pending_deletions.values():
-                    if (pending.classification is not None and pending.classification.get("alert_pending")
-                            and not pending.alert_handled):
-                        _notify_deletion_listener(pending.classification, pending.original)
+    if listener is not None and history_root().exists():
+        with _root_writer_lock():
+            for chat_dir in _iter_chat_dirs():
+                with _chat_writer_lock(chat_dir):
+                    state, _ = _load_chat_state(chat_dir, repair_tails=False)
+                    for pending in state.pending_deletions.values():
+                        if (pending.classification is not None and pending.classification.get("alert_pending")
+                                and not pending.alert_handled):
+                            _notify_deletion_listener(pending.classification, pending.original)
 
 
 def _notify_deletion_listener(record: dict[str, Any], original: MessageState | None) -> None:
