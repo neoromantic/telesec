@@ -41,7 +41,7 @@ To try a change in a real gateway, install your checkout into a test Hermes prof
 - Keep the runtime plugin ID `telesec` and the existing environment variable names. Existing installs, config keys, and update commands depend on them.
 - Keep a change focused. Add or update tests for any behavior change.
 - Update the docs in the same PR: `README.md`, `CHANGELOG.md` (under `Unreleased`), and the matching `docs/*.md`.
-- No telemetry. Do not add analytics, usage reporting, or new network calls. The plugin talks only to Telegram through the Hermes gateway, the Hermes STT backend, the host `ctx.llm`, and, for the opt-in dossier message check and fact extraction, `model_client.py`.
+- Usage stats go only through `usage_stats.py` and the devkit-managed `telemetry.py`, which you never edit here. A new feature name goes on its fixed lists; an error passes a type or code only, never text that can quote chat content. Do not add other analytics, usage reporting, or new network calls. The plugin talks only to Telegram through the Hermes gateway, the Hermes STT backend, the host `ctx.llm`, for the opt-in dossier message check and fact extraction `model_client.py`, and for [usage stats](README.md#usage-stats) `https://usage.sergeybaus.com`.
 - No plugin-owned credentials. Model calls go through `ctx.llm`. The only exception is `model_client.py`: it reads keys through the Hermes secret scope, never from `os.environ`, never stores or logs them, uses `https` only, and follows no redirects.
 - Plugin code imports only the standard library, python-telegram-bot, and Hermes core modules (lazily, inside `try`).
 - Never log message text, transcripts, dossier or note text, names, raw ids, or keys. Log a type name or code instead of an error's text, and never use `exc_info`.
