@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import threading
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -127,25 +129,43 @@ async def test_an_early_telegram_copy_is_not_saved_twice(enabled_history):
     bot.text_edit_error = RuntimeError("Bad Request: message can not be edited")
     await _publish(module, message, bot, adapter)
 
-    # The copy stays, the transcript save only marks it: one message, counted on neither side.
-    assert [(event, source, text) for event, source, _id, text, _origin in _texts(module)] == [
-        ("message.created", "business_message", RAW), ("message.created", "transcript", RAW)]
-    assert _stats(module).messages.total == 0
-    assert _dossier_view(module)["500"].label == "transcript"
+    assert [(event, source) for event, source, *_ in _texts(module)] == [("message.created", "business_message")]
 
 
 @pytest.mark.asyncio
-async def test_a_late_copy_of_the_cleanup_never_overwrites_a_newer_owner_edit(enabled_history):
+async def test_an_early_copy_deleted_before_the_send_answer_stays_deleted(enabled_history):
+    from test_history import make_deleted_update
+
+    module = enabled_history
+    message, bot, adapter = _setup()
+    observe = module._history_support.observe_ptb_update
+    send = bot.send_message
+
+    async def send_copy_then_delete(**kwargs):
+        sent = await send(**kwargs)
+        await observe(make_business_text_update(text=kwargs["text"], message_id=sent.message_id, update_id=6,
+                                                from_user_id=1000), bot=bot)
+        await observe(make_deleted_update(message_ids=(sent.message_id,)), bot=bot)
+        return sent
+
+    bot.send_message = send_copy_then_delete
+    await _publish(module, message, bot, adapter)
+
+    assert _dossier_view(module)["500"].deleted
+
+
+@pytest.mark.asyncio
+async def test_the_owner_can_restore_an_earlier_transcript_text(enabled_history):
     module = enabled_history
     message, bot, adapter = _setup()
     await _publish(module, message, bot, adapter)
     observe = module._history_support.observe_ptb_update
     await observe(make_business_text_update(text="Owner revision", message_id=500, update_id=50, from_user_id=1000,
                                             edited=True), bot=bot)
-    await observe(make_business_text_update(text=CLEAN, message_id=500, update_id=49, from_user_id=1000,
+    await observe(make_business_text_update(text=RAW, message_id=500, update_id=51, from_user_id=1000,
                                             edited=True), bot=bot)
 
-    assert _dossier_view(module)["500"].text == "Owner revision"
+    assert _dossier_view(module)["500"].text == RAW
 
 
 @pytest.mark.asyncio
@@ -273,6 +293,60 @@ async def test_a_cleanup_accepted_after_an_uncertain_caption_is_the_first_saved_
 
     assert timings["cleanup"] == "edited"
     assert _texts(module) == [("message.created", "transcript", 77, CLEAN, None)]
+
+
+@pytest.mark.asyncio
+async def test_a_voice_note_deleted_before_that_cleanup_answer_gets_no_transcript(enabled_history):
+    from test_history import make_deleted_update
+
+    module = enabled_history
+    message, bot, adapter = _setup(from_user_id=1000)
+    attempts = 0
+
+    async def caption_edit(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("request timed out")
+        await module._history_support.observe_ptb_update(make_deleted_update(message_ids=(77,)), bot=bot)
+        return True
+
+    bot.edit_message_caption = caption_edit
+    await _publish(module, message, bot, adapter)
+
+    assert [r["event_type"] for r in load_records(module)] == ["message.deleted"]
+
+
+@pytest.mark.asyncio
+async def test_history_turned_off_while_the_save_waits_for_the_lock_saves_nothing(enabled_history, monkeypatch):
+    module = enabled_history
+    message, bot, adapter = _setup()
+    history = module._history_support
+    locked, release, waiting = threading.Event(), threading.Event(), threading.Event()
+    mutate = history._mutate_chat_history_transactionally
+
+    def wait_for_lock(*args, **kwargs):
+        waiting.set()
+        return mutate(*args, **kwargs)
+
+    def hold_root_lock():
+        with history._root_writer_lock():
+            locked.set()
+            release.wait(5)
+
+    monkeypatch.setattr(history, "_mutate_chat_history_transactionally", wait_for_lock)
+    holder = asyncio.create_task(asyncio.to_thread(hold_root_lock))
+    await asyncio.to_thread(locked.wait, 3)
+    publish = asyncio.create_task(_publish(module, message, bot, adapter))
+    try:
+        assert await asyncio.to_thread(waiting.wait, 3)
+        set_switch(module, "history", False)
+    finally:
+        release.set()
+    await holder
+    await publish
+
+    assert load_records(module) == []
 
 
 @pytest.mark.asyncio

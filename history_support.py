@@ -147,12 +147,7 @@ class MessageState:
     last_observed_at: datetime | None
     deleted: bool = False
     deleted_event_id: str | None = None
-    # Texts Telesec saved itself for this transcript, kept through later edits: Telegram's copy of one is no edit.
-    transcript_texts: frozenset[str] = frozenset()
-
-    @property
-    def transcript(self) -> bool:
-        return bool(self.transcript_texts)
+    transcript: bool = False  # a transcript Telesec saved itself, kept through later edits
 
 
 @dataclass
@@ -1625,7 +1620,7 @@ def _copy_message_state(message: MessageState) -> MessageState:
         last_observed_at=message.last_observed_at,
         deleted=message.deleted,
         deleted_event_id=message.deleted_event_id,
-        transcript_texts=message.transcript_texts,
+        transcript=message.transcript,
     )
 
 
@@ -1953,8 +1948,7 @@ def _apply_record_to_state(state: ChatState, record: dict[str, Any]) -> None:
             last_observed_at=observed_at,
             deleted=False,
             deleted_event_id=None,
-            transcript_texts=(frozenset() if prior is None else prior.transcript_texts)
-            | ({record.get("text")} if record.get("source") == TRANSCRIPT_SOURCE else set()),
+            transcript=record.get("source") == TRANSCRIPT_SOURCE or (prior is not None and prior.transcript),
         )
         chat_profile = _normalize_profile_snapshot(record.get("chat_profile"))
         sender_profile = _normalize_profile_snapshot(record.get("sender_profile"))
@@ -3054,8 +3048,8 @@ async def save_transcript(message: Any, *, bot: Any, replaces: str | None = None
     with the transcript as its text. With ``replaces`` it is the cleanup's edit of that text.
 
     Telegram sends the bot no copy of its own messages and edits, so this is how they reach history, under
-    the same switches as any capture. A message Telegram's copy put in history first only gets marked as a
-    transcript, when its text is still the same; the edit is saved only while history still shows ``replaces``.
+    the same switches as any capture, read again once the writer holds the lock. A message history already has
+    or saw deleted is not saved again, and the edit only while history still shows ``replaces``.
     """
     attribute = "business_message" if replaces is None else "edited_business_message"
     update = SimpleNamespace(update_id=None, **{attribute: message})
@@ -3169,17 +3163,23 @@ async def _capture_update(update: Any, *, bot: Any, current: datetime, direction
         def _mutate_message(state: ChatState, appended_records: list[dict[str, Any]]) -> bool:
             if command_edit and str(_get(payload, "message_id")) not in state.messages:
                 return False
-            known = state.messages.get(str(_get(payload, "message_id")))
+            message_key = str(_get(payload, "message_id"))
+            known = state.messages.get(message_key)
             if transcript:
-                # Saved once; the cleanup's edit only over the raw text, never over an owner's edit, a deletion
-                # or an erase.
+                # Saved once, never after a deletion; the cleanup's edit only over the raw text, never over an
+                # owner's edit. The writer may have waited for the lock, so the switches are read again.
+                from . import chat_settings  # lazy: chat_settings imports this module
+
                 if replaces is None:
-                    if known is not None and (known.transcript or known.text != text):
-                        return False
-                elif known is None or known.deleted or known.text != replaces:
+                    stale = known is not None or any(
+                        pending.deleted_event is not None and str(pending.deleted_event.get("message_id")) == message_key
+                        for pending in state.pending_deletions.values())
+                else:
+                    stale = known is None or known.deleted or known.text != replaces
+                if stale or not history_config_from_env().active or chat_settings.paused(
+                        business_connection_id, chat_id, "history", owner=cached_business_owner(business_connection_id)):
                     return False
-            elif known is not None and known.transcript and (event_type == "message.created"
-                                                             or text in known.transcript_texts):
+            elif known is not None and known.transcript and (event_type == "message.created" or known.text == text):
                 return False  # Telegram's copy of a transcript Telesec saved itself
             record = _build_event(
                 event_type=event_type,
