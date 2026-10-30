@@ -824,15 +824,16 @@ def sort_key(m: Msg) -> tuple[Any, ...]:
 
 
 def _label_transcripts(rows: list[_Raw]) -> None:
-    """Label plugin-posted voice transcripts, in first-seen order.
+    """Label plugin-posted voice transcripts that history got from Telegram, in first-seen order.
 
-    Chunk 0 starts with the marker. A later chunk has no marker and no reply, and is first seen at
-    most TRANSCRIPT_CHAIN_SECONDS after the previous chunk, so chains of any length work.
+    Transcripts Telesec saved itself are labeled already and start no chain. Otherwise chunk 0 starts
+    with the marker. A later chunk has no marker and no reply, and is first seen at most
+    TRANSCRIPT_CHAIN_SECONDS after the previous chunk, so chains of any length work.
     """
     chain = timedelta(seconds=TRANSCRIPT_CHAIN_SECONDS)
     last: datetime | None = None
     for row in sorted(rows, key=lambda r: (r.first_seen, _id_key(r.mid))):
-        if row.direction != "outbound":
+        if row.direction != "outbound" or row.label == "transcript":
             continue
         chunk0 = row.text.lstrip().startswith(TRANSCRIPT_MARKER)
         if chunk0 or (last is not None and row.reply_to is None and row.first_seen - last <= chain):
@@ -887,7 +888,8 @@ def read_chat_view(entry: dict[str, Any], *, since: datetime) -> ChatView:
         if order_at is None:
             continue
         reply_to = None if m.reply_to_message_id is None else str(m.reply_to_message_id)
-        rows.append(_Raw(mid, m.message_id, direction, LABELS.get(direction, "unknown"), text, message_at, order_at,
+        label = "transcript" if m.transcript else LABELS.get(direction, "unknown")
+        rows.append(_Raw(mid, m.message_id, direction, label, text, message_at, order_at,
                          first or order_at, m.deleted or mid in replaced, reply_to))
     _label_transcripts(rows)
     conn = str(entry["business_connection_id"])

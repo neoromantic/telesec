@@ -18,7 +18,7 @@ No gateway restart is needed: capture starts with the next update. **🗂️ His
 
 Capture includes every private chat Telegram delivers through the bot's Business connections, except chats with [history off](#one-chat). Your own chat with the bot (where the owner panel and your agent chat live) is never captured: Telegram also delivers it as Business updates, but it is not a Business chat. The plugin knows it by the bot's id (from the running bot, or from the digits before `:` in `TELEGRAM_BOT_TOKEN`), and readers (history, stats, dossiers, the panel) also skip such a chat if an older version captured it. Groups, supergroups, and channels are never recorded. The plugin does not fetch conversations from before capture started, but you can [import a chat's earlier messages](#import-past-messages) from a Telegram Desktop export.
 
-Text, edits, deletions, reply relationships, sender/direction, and available contact snapshots are recorded. Media bytes, media metadata, and captions are excluded. Missing original text is recorded as missing rather than reconstructed. The owner's in-chat [`/stats` command](STATS.md#in-a-business-chat-stats), its card or notice, and their edits and deletion are control traffic. They are not recorded while the gateway remembers their message IDs: 24 hours, in memory. After that, or after a gateway restart, an edit or deletion of the card is recorded as an edit or deletion of a message that is not in history.
+Text, edits, deletions, reply relationships, sender/direction, and available contact snapshots are recorded, and so are the [voice transcripts Telesec posts](#voice-transcripts). Media bytes, media metadata, and other captions are excluded. Missing original text is recorded as missing rather than reconstructed. The owner's in-chat [`/stats` command](STATS.md#in-a-business-chat-stats), its card or notice, and their edits and deletion are control traffic. They are not recorded while the gateway remembers their message IDs: 24 hours, in memory. After that, or after a gateway restart, an edit or deletion of the card is recorded as an edit or deletion of a message that is not in history.
 
 ## One chat
 
@@ -111,7 +111,7 @@ Rules:
 hermes telesec history deletions --status unexplained --limit 20
 ```
 
-Edits append the full updated text. An echo observed after successful cleanup carries `edit_origin: transcript_cleanup`. An edit received before the API response stays an ordinary history event; only success appends `transcript.cleanup_confirmed` referencing its `edited_event_id`. A rejected cleanup cannot change its attribution. Stats exclude confirmed automatic edits while counting manual revisions, including those starting with 🎙️. Deletions append a tombstone while preserving earlier text. After the correction window, a deterministic classification is appended:
+Edits append the full updated text. A transcript cleanup that Telegram accepted is saved as an edit with `edit_origin: transcript_cleanup` ([voice transcripts](#voice-transcripts)), and so is a Telegram copy of it observed after the success. An edit received before the API response stays an ordinary history event; only success appends `transcript.cleanup_confirmed` referencing its `edited_event_id`. A rejected cleanup cannot change its attribution. Stats exclude confirmed automatic edits while counting manual revisions, including those starting with 🎙️. Deletions append a tombstone while preserving earlier text. After the correction window, a deterministic classification is appended:
 
 | Classification | Meaning |
 |---|---|
@@ -183,4 +183,16 @@ The native Telegram observer records eligible Business text before ordinary Herm
 
 The owner's `/dossier` command (once the bot confirms the sender as the connection's owner) and the dossier the bot posts are never recorded. A `/dossier` whose owner cannot be confirmed is stored as ordinary text, and an owner's edit of a stored message into `/dossier` is recorded as an edit. Dossiers read history only through its read locks and never modify it. `dossier forget` deletes dossier data only and never touches history; [erasing a chat](#erase-one-chat) deletes both. A deleted message that a dossier already read is sent to the dossier model once, which removes what only that message said. When retention or size pruning removes messages, the dossier keeps what it learned: pruning is never a deletion and costs no model call ([edits, deletions and retention](DOSSIERS.md#source-changes)).
 
-The separate voice module still deletes transient audio after processing. A transcript reply the bot posts reaches history like any text you send, through Telegram's copy of it; when cleanup then edits it in place, history records an edit of the same message, so it keeps one final text. A transcript added to a caption is not recorded, because history keeps no captions.
+The separate voice module still deletes transient audio after processing.
+
+## Voice transcripts
+
+Telegram does not send the bot a copy of the messages it posts or the edits it makes, so Telesec saves each transcript itself once Telegram has accepted it. Before 0.17.1 a transcript reply never reached history, and this release does not add old ones back: history only has transcripts posted after the upgrade.
+
+- **Reply.** Each part Telegram accepted is saved as a new message with `"source":"transcript"`, `direction: outbound` (it is posted from your account), and the text the chat shows. The first part starts with `🎙️` and replies to the voice message.
+- **Caption.** A transcript added to the caption of your own voice note or round video is saved as that voice message, with only the `🎙️` transcript as its text. Your own caption words before it and your later edits of that caption are not saved, because history keeps no other captions.
+- **Cleanup.** When Telegram accepts the cleaned text, history saves an edit of the same message with `edit_origin: transcript_cleanup`, so it keeps one final text. The edit is saved only while history still has the raw text: an edit or a deletion of yours saved first stays.
+- **Failures.** A part Telegram rejected, a caption whose result is uncertain, and a cleanup Telegram rejected are not saved; the raw text stays as the latest text. When the raw caption was uncertain but Telegram accepts the cleanup, the cleaned text is saved as the first one.
+- **Switches.** The same switches decide as for any message, read again right before the write: nothing is saved while history is off in Settings or for that chat. A cleanup never saves into a chat you erased meanwhile, and nothing is saved for a message history saw deleted.
+- **Copies.** If Telegram ever sends a copy of a saved transcript, or of its cleanup while history still shows it, the copy adds nothing. If a copy came first, it stays as it is and the transcript is not saved again.
+- **Readers.** `history show` and search show and find transcripts. [Stats](STATS.md#what-is-counted) count them as neither side, and [dossiers](DOSSIERS.md) read them as voice transcripts.

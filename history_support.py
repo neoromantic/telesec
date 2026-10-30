@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TypeVar
 
 try:
@@ -91,6 +92,8 @@ _OWNER_CACHE: dict[str, str] = {}
 _CACHE_LOCK = threading.RLock()
 _CHAT_STATE_CACHE: dict[str, ChatStateCacheEntry] = {}
 _DELETION_TIMERS: dict[tuple[str, str], DeletionTimerEntry] = {}
+# The source of a transcript Telesec saved itself (save_transcript), next to the update names and "import".
+TRANSCRIPT_SOURCE = "transcript"
 # Cleanup attempts awaiting an API result or echo. Early edits stay ordinary history until success.
 _TRANSCRIPT_CLEANUPS: dict[tuple[str, str, str], dict[str, Any]] = {}
 # Called with each pending deletion alert and the deleted message as history saved it (None when it
@@ -144,6 +147,7 @@ class MessageState:
     last_observed_at: datetime | None
     deleted: bool = False
     deleted_event_id: str | None = None
+    transcript: bool = False  # a transcript Telesec saved itself, kept through later edits
 
 
 @dataclass
@@ -1616,6 +1620,7 @@ def _copy_message_state(message: MessageState) -> MessageState:
         last_observed_at=message.last_observed_at,
         deleted=message.deleted,
         deleted_event_id=message.deleted_event_id,
+        transcript=message.transcript,
     )
 
 
@@ -1931,6 +1936,7 @@ def _apply_record_to_state(state: ChatState, record: dict[str, Any]) -> None:
     message_key = str(record.get("message_id"))
     observed_at = _parse_datetime(record.get("observed_at"))
     if event_type in {"message.created", "message.edited"}:
+        prior = state.messages.get(message_key)
         state.messages[message_key] = MessageState(
             message_id=record.get("message_id"),
             sender_id=record.get("sender_id"),
@@ -1942,6 +1948,7 @@ def _apply_record_to_state(state: ChatState, record: dict[str, Any]) -> None:
             last_observed_at=observed_at,
             deleted=False,
             deleted_event_id=None,
+            transcript=record.get("source") == TRANSCRIPT_SOURCE or (prior is not None and prior.transcript),
         )
         chat_profile = _normalize_profile_snapshot(record.get("chat_profile"))
         sender_profile = _normalize_profile_snapshot(record.get("sender_profile"))
@@ -3036,7 +3043,22 @@ async def _chat_capture_paused(bot: Any, business_connection_id: Any, chat_id: A
         return True
 
 
-async def _capture_update(update: Any, *, bot: Any, current: datetime, direction: str | None) -> bool:
+async def save_transcript(message: Any, *, bot: Any, replaces: str | None = None) -> bool:
+    """Save a transcript Telesec delivered, as ``message`` carries it: a reply part, or the voice note itself
+    with the transcript as its text. With ``replaces`` it is the cleanup's edit of that text.
+
+    Telegram sends the bot no copy of its own messages and edits, so this is how they reach history, under
+    the same switches as any capture, read again once the writer holds the lock. A message history already has
+    or saw deleted is not saved again, and the edit only while history still shows ``replaces``.
+    """
+    attribute = "business_message" if replaces is None else "edited_business_message"
+    update = SimpleNamespace(update_id=None, **{attribute: message})
+    return await _capture_update(update, bot=bot, current=_utcnow(), direction="outbound", transcript=True,
+                                 replaces=replaces)
+
+
+async def _capture_update(update: Any, *, bot: Any, current: datetime, direction: str | None,
+                          transcript: bool = False, replaces: str | None = None) -> bool:
     config = history_config_from_env()
     if not config.active:
         return False
@@ -3057,6 +3079,8 @@ async def _capture_update(update: Any, *, bot: Any, current: datetime, direction
             break
     if payload is None or event_type is None or source is None:
         return False
+    if transcript:
+        source = TRANSCRIPT_SOURCE
 
     business_connection_id = _get(payload, "business_connection_id") or _get(payload, "_hermes_business_connection_id")
     chat = _get(payload, "chat")
@@ -3139,6 +3163,24 @@ async def _capture_update(update: Any, *, bot: Any, current: datetime, direction
         def _mutate_message(state: ChatState, appended_records: list[dict[str, Any]]) -> bool:
             if command_edit and str(_get(payload, "message_id")) not in state.messages:
                 return False
+            message_key = str(_get(payload, "message_id"))
+            known = state.messages.get(message_key)
+            if transcript:
+                # Saved once, never after a deletion; the cleanup's edit only over the raw text, never over an
+                # owner's edit. The writer may have waited for the lock, so the switches are read again.
+                from . import chat_settings  # lazy: chat_settings imports this module
+
+                if replaces is None:
+                    stale = known is not None or any(
+                        pending.deleted_event is not None and str(pending.deleted_event.get("message_id")) == message_key
+                        for pending in state.pending_deletions.values())
+                else:
+                    stale = known is None or known.deleted or known.text != replaces
+                if stale or not history_config_from_env().active or chat_settings.paused(
+                        business_connection_id, chat_id, "history", owner=cached_business_owner(business_connection_id)):
+                    return False
+            elif known is not None and known.transcript and (event_type == "message.created" or known.text == text):
+                return False  # Telegram's copy of a transcript Telesec saved itself
             record = _build_event(
                 event_type=event_type,
                 source=source,
@@ -3158,7 +3200,7 @@ async def _capture_update(update: Any, *, bot: Any, current: datetime, direction
             with _CACHE_LOCK:
                 cleanup = _TRANSCRIPT_CLEANUPS.get(cleanup_key)
                 matching = event_type == "message.edited" and cleanup is not None and cleanup["text"] == text
-                if matching and cleanup["confirmed"]:
+                if (matching and cleanup["confirmed"]) or replaces is not None:
                     record["edit_origin"] = "transcript_cleanup"
                 wrote_record = _append_record_to_state(chat_dir, state, record, appended_records=appended_records)
                 if matching:
@@ -3180,6 +3222,7 @@ async def _capture_update(update: Any, *, bot: Any, current: datetime, direction
             chat_dir,
             dirty_reason="incremental_capture_refresh_failed",
             mutate=_mutate_message,
+            existing_only=replaces is not None,
         )
 
     if refresh_exc is not None:
