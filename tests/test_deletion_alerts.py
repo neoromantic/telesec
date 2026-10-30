@@ -258,7 +258,8 @@ async def test_actual_cleanup_echo_saves_provenance_but_owner_edit_counts(enable
     bot.edit_message_text = edit
     await module._publish_transcript(bot=bot, adapter=gateway.adapters[event.source.platform], message=message,
         transcript=RAW_FIRST_RAW, cleanup_fn=lambda _: RAW_FIRST_CLEAN, llm=None)
-    records = load_records(module)
+    # Telesec's own save that marks the copied raw text as a transcript is dated now, in a later month file.
+    records = [record for record in load_records(module) if record["source"] != "transcript"]
     if not rejected:
         assert records[-1]["edit_origin"] == "transcript_cleanup"
     scan = module.correspondence_stats.ChatScan("business-123", "991")

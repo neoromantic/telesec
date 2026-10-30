@@ -147,7 +147,12 @@ class MessageState:
     last_observed_at: datetime | None
     deleted: bool = False
     deleted_event_id: str | None = None
-    transcript: bool = False  # a transcript Telesec saved itself, kept through later edits
+    # Texts Telesec saved itself for this transcript, kept through later edits: Telegram's copy of one is no edit.
+    transcript_texts: frozenset[str] = frozenset()
+
+    @property
+    def transcript(self) -> bool:
+        return bool(self.transcript_texts)
 
 
 @dataclass
@@ -1620,7 +1625,7 @@ def _copy_message_state(message: MessageState) -> MessageState:
         last_observed_at=message.last_observed_at,
         deleted=message.deleted,
         deleted_event_id=message.deleted_event_id,
-        transcript=message.transcript,
+        transcript_texts=message.transcript_texts,
     )
 
 
@@ -1948,7 +1953,8 @@ def _apply_record_to_state(state: ChatState, record: dict[str, Any]) -> None:
             last_observed_at=observed_at,
             deleted=False,
             deleted_event_id=None,
-            transcript=record.get("source") == TRANSCRIPT_SOURCE or (prior is not None and prior.transcript),
+            transcript_texts=(frozenset() if prior is None else prior.transcript_texts)
+            | ({record.get("text")} if record.get("source") == TRANSCRIPT_SOURCE else set()),
         )
         chat_profile = _normalize_profile_snapshot(record.get("chat_profile"))
         sender_profile = _normalize_profile_snapshot(record.get("sender_profile"))
@@ -3048,8 +3054,8 @@ async def save_transcript(message: Any, *, bot: Any, replaces: str | None = None
     with the transcript as its text. With ``replaces`` it is the cleanup's edit of that text.
 
     Telegram sends the bot no copy of its own messages and edits, so this is how they reach history, under
-    the same switches as any capture. A message history already has is not saved again, and the edit only
-    while history still shows ``replaces``.
+    the same switches as any capture. A message Telegram's copy put in history first only gets marked as a
+    transcript, when its text is still the same; the edit is saved only while history still shows ``replaces``.
     """
     attribute = "business_message" if replaces is None else "edited_business_message"
     update = SimpleNamespace(update_id=None, **{attribute: message})
@@ -3165,10 +3171,15 @@ async def _capture_update(update: Any, *, bot: Any, current: datetime, direction
                 return False
             known = state.messages.get(str(_get(payload, "message_id")))
             if transcript:
-                # Saved once; the cleanup's edit only over the raw text, not over an owner's edit or an erase.
-                if (known is not None) if replaces is None else (known is None or known.text != replaces):
+                # Saved once; the cleanup's edit only over the raw text, never over an owner's edit, a deletion
+                # or an erase.
+                if replaces is None:
+                    if known is not None and (known.transcript or known.text != text):
+                        return False
+                elif known is None or known.deleted or known.text != replaces:
                     return False
-            elif known is not None and known.transcript and (event_type == "message.created" or known.text == text):
+            elif known is not None and known.transcript and (event_type == "message.created"
+                                                             or text in known.transcript_texts):
                 return False  # Telegram's copy of a transcript Telesec saved itself
             record = _build_event(
                 event_type=event_type,

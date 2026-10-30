@@ -1971,8 +1971,10 @@ async def _publish_transcript(
                 bot=bot, message=message, surface=surface, target_id=target_id, cleaned=cleaned
             )
             if outcome == "edited":
+                # A caption edit with an uncertain result saved no raw text: the cleaned one is the first.
+                raw_saved = surface == "reply" or caption_outcome is TranscriptCaptionOutcome.ATTACHED
                 await _save_transcript(bot, message, target, _format_transcript_messages(cleaned)[0],
-                                       reply_to=reply_to, replaces=raw_reply)
+                                       reply_to=reply_to, replaces=raw_reply if raw_saved else None)
         _timing_mark(timings, "cleanup", outcome)
         return (cleaned if outcome == "edited" else raw), caption_outcome
     finally:

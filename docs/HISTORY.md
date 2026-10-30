@@ -189,10 +189,10 @@ The separate voice module still deletes transient audio after processing.
 
 Telegram does not send the bot a copy of the messages it posts or the edits it makes, so Telesec saves each transcript itself once Telegram has accepted it. Before 0.17.1 a transcript reply never reached history, and this release does not add old ones back: history only has transcripts posted after the upgrade.
 
-- **Reply.** Each part Telegram accepted is saved as a new message with `"source":"transcript"`, `direction: outbound` (it is posted from your account), and the text the chat shows, starting with `🎙️`. The first part replies to the voice message.
+- **Reply.** Each part Telegram accepted is saved as a new message with `"source":"transcript"`, `direction: outbound` (it is posted from your account), and the text the chat shows. The first part starts with `🎙️` and replies to the voice message.
 - **Caption.** A transcript added to the caption of your own voice note or round video is saved as that voice message, with only the `🎙️` transcript as its text. Your own caption words before it and your later edits of that caption are not saved, because history keeps no other captions.
-- **Cleanup.** When Telegram accepts the cleaned text, history saves an edit of the same message with `edit_origin: transcript_cleanup`, so it keeps one final text. The edit is saved only while history still has the raw text: an edit of yours saved first stays the latest text.
-- **Failures.** A part Telegram rejected, a caption whose result is uncertain, and a cleanup Telegram rejected are not saved; the raw text stays as the latest text.
+- **Cleanup.** When Telegram accepts the cleaned text, history saves an edit of the same message with `edit_origin: transcript_cleanup`, so it keeps one final text. The edit is saved only while history still has the raw text: an edit or a deletion of yours saved first stays.
+- **Failures.** A part Telegram rejected, a caption whose result is uncertain, and a cleanup Telegram rejected are not saved; the raw text stays as the latest text. When the raw caption was uncertain but Telegram accepts the cleanup, the cleaned text is saved as the first one.
 - **Switches.** The same switches decide as for any message: nothing is saved while history is off in Settings or for that chat. A cleanup never saves into a chat you erased meanwhile.
-- **Copies.** If Telegram ever sends a copy of a saved transcript or its cleanup, it adds nothing. If the copy came first, it is kept and the transcript is not saved again.
+- **Copies.** If Telegram ever sends a copy of a saved transcript or of its cleanup, it adds nothing, even after a later edit of yours. If the copy came first with the same text, the save only marks it as a transcript.
 - **Readers.** `history show` and search show and find transcripts. [Stats](STATS.md#what-is-counted) count them as neither side, and [dossiers](DOSSIERS.md) read them as voice transcripts.

@@ -127,7 +127,44 @@ async def test_an_early_telegram_copy_is_not_saved_twice(enabled_history):
     bot.text_edit_error = RuntimeError("Bad Request: message can not be edited")
     await _publish(module, message, bot, adapter)
 
-    assert [(event, source) for event, source, *_ in _texts(module)] == [("message.created", "business_message")]
+    # The copy stays, the transcript save only marks it: one message, counted on neither side.
+    assert [(event, source, text) for event, source, _id, text, _origin in _texts(module)] == [
+        ("message.created", "business_message", RAW), ("message.created", "transcript", RAW)]
+    assert _stats(module).messages.total == 0
+    assert _dossier_view(module)["500"].label == "transcript"
+
+
+@pytest.mark.asyncio
+async def test_a_late_copy_of_the_cleanup_never_overwrites_a_newer_owner_edit(enabled_history):
+    module = enabled_history
+    message, bot, adapter = _setup()
+    await _publish(module, message, bot, adapter)
+    observe = module._history_support.observe_ptb_update
+    await observe(make_business_text_update(text="Owner revision", message_id=500, update_id=50, from_user_id=1000,
+                                            edited=True), bot=bot)
+    await observe(make_business_text_update(text=CLEAN, message_id=500, update_id=49, from_user_id=1000,
+                                            edited=True), bot=bot)
+
+    assert _dossier_view(module)["500"].text == "Owner revision"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_deleted_before_the_cleanup_answer_stays_deleted(enabled_history):
+    from test_history import make_deleted_update
+
+    module = enabled_history
+    message, bot, adapter = _setup()
+
+    async def edit_then_delete(**kwargs):
+        bot.text_edit_calls.append(kwargs)
+        await module._history_support.observe_ptb_update(make_deleted_update(message_ids=(500,)), bot=bot)
+        return True
+
+    bot.edit_message_text = edit_then_delete
+    await _publish(module, message, bot, adapter)
+
+    assert [r["event_type"] for r in load_records(module)] == ["message.created", "message.deleted"]
+    assert _dossier_view(module)["500"].deleted
 
 
 @pytest.mark.asyncio
@@ -224,6 +261,18 @@ async def test_an_owner_voice_caption_transcript_is_saved_as_that_voice_note(ena
     stats = _stats(module)
     assert (stats.messages.sent, stats.edited.total) == (0, 0)
     assert _dossier_view(module)["77"].label == "transcript"
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_accepted_after_an_uncertain_caption_is_the_first_saved_text(enabled_history):
+    module = enabled_history
+    message, bot, adapter = _setup(from_user_id=1000)
+    bot.edit_side_effects = [TimeoutError("request timed out"), True]
+
+    timings = await _publish(module, message, bot, adapter)
+
+    assert timings["cleanup"] == "edited"
+    assert _texts(module) == [("message.created", "transcript", 77, CLEAN, None)]
 
 
 @pytest.mark.asyncio
