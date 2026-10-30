@@ -1698,8 +1698,10 @@ async def _send_transcript_messages(
     message: Any,
     texts: Iterable[str],
     collapsible: bool = True,
+    save: bool = False,
 ) -> list[Any]:
-    """Send the transcript as a reply to ``message``; returns what each send returned."""
+    """Send the transcript as a reply to ``message``, saving each sent part when ``save``; returns what each
+    send returned."""
     chat_id = getattr(getattr(message, "chat", None), "id", None)
     business_connection_id = _business_connection_id(message)
     reply_to_message_id = getattr(message, "message_id", None)
@@ -1728,8 +1730,24 @@ async def _send_transcript_messages(
             logger.info("%s: expandable transcript unavailable; using plain text: %s", _PLUGIN_NAME, exc)
             fallback_kwargs = {key: value for key, value in kwargs.items() if key != "entities"}
             sent.append(await bot.send_message(**fallback_kwargs))
+        if save:
+            await _save_transcript(bot, message, sent[-1], text, reply_to=message if first else None)
         first = False
     return sent
+
+
+async def _save_transcript(bot: Any, message: Any, shown: Any, text: str, *, reply_to: Any,
+                           replaces: str | None = None) -> None:
+    """Save a delivered transcript to history: ``shown`` is its reply, or ``message`` itself for a caption."""
+    payload = SimpleNamespace(
+        business_connection_id=_business_connection_id(message), chat=_get(message, "chat"),
+        message_id=_get(shown, "message_id"), date=_get(shown, "date"), from_user=_get(shown, "from_user"),
+        reply_to_message=reply_to, text=text,
+    )
+    try:
+        await _history_support.save_transcript(payload, bot=bot, replaces=replaces)
+    except Exception as exc:  # noqa: BLE001 - history must never cost the contact the transcript
+        logger.warning("%s: transcript history save failed (%s)", _PLUGIN_NAME, type(exc).__name__)
 
 
 async def _send_error_if_enabled(*, bot: Any, adapter: Any, message: Any, error: str) -> None:
@@ -1895,7 +1913,11 @@ async def _publish_transcript(
                 adapter=adapter,
                 message=message,
                 texts=_format_transcript_messages(final_text),
+                save=True,
             )
+        elif caption_outcome is TranscriptCaptionOutcome.ATTACHED:
+            await _save_transcript(bot, message, message, _format_transcript_messages(final_text)[0],
+                                   reply_to=_get(message, "reply_to_message"))
         _timing_mark(timings, "first_visible")
         return final_text, caption_outcome
 
@@ -1911,16 +1933,20 @@ async def _publish_transcript(
         if caption_outcome is TranscriptCaptionOutcome.REPLY_FALLBACK:
             _PENDING_TRANSCRIPTS.pop(source_key, None)
             sent = await _send_transcript_messages(
-                bot=bot, adapter=adapter, message=message, texts=[raw_reply]
+                bot=bot, adapter=adapter, message=message, texts=[raw_reply], save=True
             )
-            surface, target_id = "reply", _get(sent[0], "message_id")
+            surface, target, reply_to = "reply", sent[0], message
+            target_id = _get(target, "message_id")
             key = _transcript_target_key(message, target_id)
             _PENDING_TRANSCRIPTS[key] = {raw_reply.strip()}
             if str(target_id) in cancelled:
                 _PENDING_TRANSCRIPTS[key].clear()
         else:
-            surface, target_id = "caption", _get(message, "message_id")
+            surface, target, reply_to = "caption", message, _get(message, "reply_to_message")
+            target_id = _get(target, "message_id")
             key = source_key
+            if caption_outcome is TranscriptCaptionOutcome.ATTACHED and _PENDING_TRANSCRIPTS.get(key):
+                await _save_transcript(bot, message, target, raw_reply, reply_to=reply_to)
     except BaseException:
         _PENDING_TRANSCRIPTS.pop(source_key, None)
         raise
@@ -1944,6 +1970,9 @@ async def _publish_transcript(
             outcome = await _edit_transcript_in_place(
                 bot=bot, message=message, surface=surface, target_id=target_id, cleaned=cleaned
             )
+            if outcome == "edited":
+                await _save_transcript(bot, message, target, _format_transcript_messages(cleaned)[0],
+                                       reply_to=reply_to, replaces=raw_reply)
         _timing_mark(timings, "cleanup", outcome)
         return (cleaned if outcome == "edited" else raw), caption_outcome
     finally:

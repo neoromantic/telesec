@@ -142,7 +142,7 @@ Messages follow the same rules as the planned correspondence insights ([#4](http
 - One message per connection, chat, and message ID, ordered by Telegram send time, with `at` in your local time.
 - Text messages only. History has no media or captions.
 - `from` is `contact`, `owner`, or `unknown` (direction not known).
-- A voice transcript the plugin posted is marked `"voice": true` and `from: unknown`: the speaker is unknown and the text may have recognition errors. Its first part starts with the plugin's `🎙️` marker, and its text is the final one: the raw text Telesec posted first, or the cleaned text it put in the same message afterwards; a later part of a long transcript counts as transcript too when it was sent within 10 seconds of the part before it and replies to nothing.
+- A voice transcript the plugin posted is marked `"voice": true` and `from: unknown`: the speaker is unknown and the text may have recognition errors. Its text is the final one: the raw text Telesec posted first, or the cleaned text it put in the same message afterwards. Since 0.17.1 Telesec [saves each transcript itself](HISTORY.md#voice-transcripts), every part of a long one included, and that is how the dossier knows it is a transcript. An older transcript that reached history as Telegram's copy or through an import is recognized as before: its first part starts with the plugin's `🎙️` marker, and a later part counts when it was sent within 10 seconds of the part before it and replies to nothing.
 
 Each message has a short reference such as `m102`. The contact's name, username, and ids are never sent. Message text is sent as is, so a name written inside a message does reach the model.
 
@@ -544,7 +544,7 @@ The plan from the deleted `m106` is not in it, because the refresh dropped it. "
 
 ## Limitations
 
-- Voice notes are not a source. Only transcript text the plugin posted into the chat is in history. A later part of a long transcript sent more than 10 seconds after the part before it counts as the owner's own text, including for the persona.
+- Voice notes are not a source. Only transcript text the plugin posted into the chat is in history, from 0.17.1 on; transcripts posted before it are not in history. In an older transcript that reached history as Telegram's copy, a later part sent more than 10 seconds after the part before it counts as the owner's own text, including for the persona.
 - A dossier is a model's summary and can be wrong or leave things out. Refs show where a fact came from, but nothing checks them; correct a dossier with a note.
 - Raising the backfill settings later does not send older history to existing dossiers. `forget` a dossier to rebuild it with the new window.
 - The model that answered can differ from the configured one when the host falls back, and one plugin call can cost several provider requests.

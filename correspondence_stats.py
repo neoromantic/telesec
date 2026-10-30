@@ -100,6 +100,8 @@ class _Message:
     message_at: datetime | None = None
     side: str = "unknown"
     edit_events: set[str] = field(default_factory=set)
+    # A transcript Telesec saved itself: a voice note's text, not a message anyone typed.
+    transcript: bool = False
     # Only the length of the latest text is kept, never the text itself.
     text_length: int | None = None
 
@@ -155,6 +157,7 @@ class ChatScan:
             if message is None:
                 message = self.messages[key] = _Message(message_id=message_id, first_observed_at=observed)
             message.created = message.created or event_type == "message.created"
+            message.transcript = message.transcript or record.get("source") == _history.TRANSCRIPT_SOURCE
             message.first_observed_at = min(message.first_observed_at, observed)
             message_at = _history._parse_datetime(record.get("message_at"))
             if message_at is not None and (message.message_at is None or message_at < message.message_at):
@@ -881,7 +884,8 @@ def summarize_scan(entry: dict[str, Any], scan: ChatScan, window: StatsWindow) -
     replaced = {key for key, status in key_status.items() if status in REPLACED}
     # The timeline keeps messages sent after --until so a later reply is still observed.
     timeline = sorted(
-        (message for key, message in scan.messages.items() if message.created and key not in replaced),
+        (message for key, message in scan.messages.items()
+         if message.created and not message.transcript and key not in replaced),
         key=lambda message: message.sort_key,
     )
     counted = [message for message in timeline if window.contains(message.at)]

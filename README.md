@@ -21,6 +21,7 @@
 6. Optionally asks the host-owned `ctx.llm` facade for conservative proofreading or opt-in enrichment with ASR correction, filler cleanup, paragraphing, lists, and long-note titles. Empty output or a catastrophic size change gets one feedback retry.
 7. When cleanup returns different text that still fits, edits the same caption or reply in place. Telesec never posts a second transcript. If cleanup fails, times out, returns the same text, or no longer fits, or you edit the transcript yourself meanwhile, the raw text stays.
 8. A raw transcript longer than one message is still cleaned first and then posted, in parts.
+9. With [history](#correspondence-history) on, saves the transcript Telegram accepted, and its cleanup, to the chat's history. Telegram sends the bot no copy of its own messages, so Telesec saves them itself. Stats do not count a transcript as a message you typed, and dossiers read it as a voice transcript ([voice transcripts](docs/HISTORY.md#voice-transcripts)).
 
 Handled updates are identified from stable Telegram Business connection, chat, update/message, and relationship data, then suppressed in memory for 24 hours. A successful caption edit suppresses the separate transcript reply, so the chat never receives both forms. PTB `BadRequest` is treated as a definite Telegram-side rejection unless it is the recognized `message is not modified` or unsupported-entity case. Failed entity requests are not treated as delivered before their targeted plain-text retry, and ambiguous post-send transport/backend failures suppress the reply fallback unless remote state is verified. The voice pipeline never runs a separate model provider client and never needs its own credentials.
 
@@ -232,7 +233,7 @@ hermes telesec history deletions --status unexplained --limit 20
 
 History captures new text messages, edits, and deletions as Telegram delivers them. It preserves deleted text and distinguishes likely corrections, duplicates, unexplained deletions, and missing originals. It does not fetch old conversations, but you can import one chat's earlier messages from a Telegram Desktop export with `hermes telesec history import result.json --chat 991` ([import past messages](docs/HISTORY.md#import-past-messages)). Contact names and observed aliases are searchable; ambiguous names require an explicit choice.
 
-Canonical storage is profile-local JSONL with a rebuildable contact catalog. Capture and search require no LLM. Media and captions are excluded from history in this version. [History configuration, retention, and CLI](docs/HISTORY.md).
+Canonical storage is profile-local JSONL with a rebuildable contact catalog. Capture and search require no LLM. Media and captions are excluded from history in this version, except the [voice transcripts](docs/HISTORY.md#voice-transcripts) Telesec posts. [History configuration, retention, and CLI](docs/HISTORY.md).
 
 ## Deletion alerts
 
@@ -541,6 +542,7 @@ Telegram gateway event
   -> minimal structural sanity check / one feedback retry / raw stays
   -> changed and still fits: edit the same caption or reply (editMessageCaption / editMessageText)
   -> raw longer than one message: cleanup first, then publish in parts
+  -> history on: save each accepted publish and cleanup edit (source=transcript; Telegram sends no copy)
 ```
 
 Outgoing direction is checked against the owner returned by Telegram's `getBusinessConnection`; `sender_business_bot` is also accepted as an explicit outgoing signal. Caption text is plain text and limited conservatively to Telegram's 1024 UTF-16 code-unit ceiling. An existing caption is retained unchanged at the start, including its entities, then separated from the transcript by a blank line. A UTF-16-positioned `expandable_blockquote` entity covers only the appended transcript block.
@@ -590,7 +592,7 @@ hermes telesec telemetry status --format json
 
 - Native Telegram handlers require Hermes's in-process plugin mode; `plugins.isolation: host` cannot pass the Telegram Application to this plugin.
 - STT currently calls the undocumented core `tools.transcription_tools.transcribe_audio` function. Hermes provides backend-registration APIs but no documented plugin facade to invoke configured STT. This produces a catalog warning and can break on a core update; [submission notes](docs/CATALOG_SUBMISSION.md) explain the dependency.
-- History starts when enabled and captures text only; it cannot retrieve old chats, media, or captions. Local history preserves deleted text until retention, an erase, or explicit removal.
+- History starts when enabled and captures text only; it cannot retrieve old chats, media, or captions. Transcripts posted before 0.17.1 never reached history, and the upgrade does not add them back. Local history preserves deleted text until retention, an erase, or explicit removal.
 - Dossiers need history and a separate opt-in. They cover private contacts (a chat's 📇 Dossier switch skips one) and keep what they learned after retention prunes history. A dossier is a model's summary and can be wrong; correct it with an owner note. Drafts and automatic replies are planned.
 - Attached-audio speech detection is a heuristic; recognized vocals may pass. LLM cleanup can change meaning; the contact may read the raw transcript before cleanup edits it, and a cleaned reply shows Telegram's "edited" mark. The surface is chosen from the raw text: a raw reply stays a reply even when the cleaned text would fit a caption.
 - Claimed updates stop before Hermes's group-99 ingress counter, which can produce a stale health warning. Telegram permissions and edit/send windows still apply.
