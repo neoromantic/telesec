@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/neoromantic/telesec/actions/workflows/ci.yml/badge.svg)](https://github.com/neoromantic/telesec/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Usage stats](https://img.shields.io/badge/usage-stats-595b54)](https://www.sergeybaus.com/usage/telesec)
 
 **Telesec — Telegram Business secretary for [Hermes](https://github.com/NousResearch/hermes-agent).** Voice messages, round video notes, and conservatively recognized attached audio files become readable text without a full agent turn. Optional correspondence history preserves text, edits, and deletions for contact-based search.
 
@@ -630,3 +631,5 @@ Live Telegram client rendering and provider cleanup quality require a separate c
 ## License
 
 [MIT](LICENSE)
+
+Made by [Sergey Baus](https://www.sergeybaus.com).
