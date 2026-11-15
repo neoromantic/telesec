@@ -47,7 +47,9 @@ Voice cleanup: gemini / gemini-3.8-flash
 
 Each feature is one button with its emoji and state: tap ✅ to turn it off, ❌ to turn it on.
 
-![Real Telegram screenshot of Settings in the owner's private chat with the bot over made-up data: "Telesec settings · all chats", Usage stats: on, the dossier and voice cleanup models, then 🎙️ Transcription ✅, 🗂️ History ✅, ⏳ Keep history: forever ›, 📇 Dossiers ❌, 🔔 Deletion alerts ✅, and • Share usage stats / Don't share.](docs/images/settings.png)
+Settings after the owner turned usage stats on (they are off by default, as in the text above):
+
+![Real Telegram screenshot of Settings in the owner's private chat with the bot over made-up data, after the owner turned usage stats on: "Telesec settings · all chats", Usage stats: on, the dossier and voice cleanup models, then 🎙️ Transcription ✅, 🗂️ History ✅, ⏳ Keep history: forever ›, 📇 Dossiers ❌, 🔔 Deletion alerts ✅, and • Share usage stats / Don't share.](docs/images/settings.png)
 
 Or from the terminal:
 
@@ -64,7 +66,7 @@ A change applies to the next update; no restart is needed. To turn history, the 
 
 **⏳ Keep history: forever ›** shows how long saved history is kept and opens a picker: **Forever · 1 year · 90 days · 30 days**, and **‹ Settings** to go back. A shorter time asks first; a longer one applies at once. History is deleted a whole month at a time: once all of a month is older than the chosen time, the next cleanup deletes it, so the current month always stays. Cleanup runs when the gateway starts, when a `hermes` command loads Telesec (such as `hermes telesec settings`), and at most hourly while Business messages arrive. The button stays while history is off, because cleanup keeps running. In the terminal, `hermes telesec settings set retention N` sets any number of days, and the picker shows such a value as its own button (for example `• 45 days`) until you pick another. See [retention and removal](docs/HISTORY.md#retention-and-removal).
 
-The `Usage stats:` line and the **Share usage stats · Don't share** row switch [usage stats](#usage-stats) for this gateway; they are off until you tap **Share usage stats**. While `TELESEC_TELEMETRY` or `DO_NOT_TRACK` in the gateway's environment decides, the line names the variable and the row is not shown.
+The `Usage stats:` line and the **Share usage stats · Don't share** row switch [usage stats](#usage-stats) for this gateway; they are off until you tap **Share usage stats**. While `TELESEC_TELEMETRY=0` or `DO_NOT_TRACK` in the gateway's environment keeps them off, the line names the variable and the row is not shown.
 
 The last lines show the model that writes dossiers (`your main model` when its task follows the main model) and the model that cleans up voice transcripts (or `off`), as configured. They are read-only: choose the dossier model with `hermes model` → Telesec dossiers ([dossier model](#dossier-model)) and the cleanup model in the [configuration](#configuration). A warning line follows the dossier model when its `extra_body` still has the gateway-only `providerOptions` on another provider.
 
@@ -411,7 +413,7 @@ See the [Hermes plugin settings API](https://hermes-agent.nousresearch.com/docs/
 | `TELESEC_DOSSIER_BACKFILL_DAYS` | `90` | First-pass and tracking window for dossiers, in days; bounded to 1–3650. |
 | `TELESEC_DOSSIER_BACKFILL_MESSAGES` | `500` | First-build message cap per contact; bounded to 10–5000. |
 | `TELESEC_DOSSIER_MAX_CALLS_PER_MINUTE` | `20` | Dossier model calls per minute; bounded to 1–600. |
-| `TELESEC_TELEMETRY` | unset | [Usage stats](#usage-stats): `0`, `off`, or `false` keeps them off, whatever Settings or `hermes telesec telemetry` say. `1`, `on`, or `true` keeps them on once the owner has turned them on, and `debug` then prints each event to stderr instead of sending it; neither turns them on by itself. |
+| `TELESEC_TELEMETRY` | unset | [Usage stats](#usage-stats): `0`, `off`, or `false` keeps them off, whatever Settings or `hermes telesec telemetry` say. `1`, `on`, and `true` change nothing: only the owner's choice turns them on or off. `debug` prints each event to stderr instead of sending it while the owner has them on. |
 | `DO_NOT_TRACK` | unset | Any value but `0` or `false` turns usage stats off, before `TELESEC_TELEMETRY`. |
 
 Boolean values accept `1`, `true`, `yes`, or `on` (case-insensitive).
@@ -575,7 +577,7 @@ Telesec can send usage stats to its author, so he can see how many installs run,
 
 > Telesec can share usage stats with its author: how often it runs, which features are used, error codes, version and OS, tied to a random install ID. Never message text, transcripts, names, or chat IDs. Usage stats are off: nothing is sent unless you turn them on with the button below, in Settings, or with `hermes telesec telemetry on`. Details: https://usage.sergeybaus.com
 
-- **Turn them on.** Only the owner turns them on, with one of: **Enable usage stats** under the notice, **Share usage stats** in Settings (`/telesec`), or `hermes telesec telemetry on`. Getting or reading the notice, in Telegram or in a terminal, turns nothing on, and neither does `TELESEC_TELEMETRY=1`. An install updated from 0.17, which sent usage stats by default once the owner had seen its notice, stops sending; one where the owner turned them on keeps them on.
+- **Turn them on.** Only the owner turns them on, with one of: **Enable usage stats** under the notice, **Share usage stats** in Settings (`/telesec`), or `hermes telesec telemetry on`. Getting or reading the notice, in Telegram or in a terminal, turns nothing on, and neither does `TELESEC_TELEMETRY=1`, even on an install updated from 0.17. An install updated from 0.17, which sent usage stats by default once the owner had seen its notice, stops sending; one where the owner turned them on keeps them on.
 - **What is sent.** `app_installed` once, `app_started` when the gateway starts, `feature_used` with a name from a fixed list in [`usage_stats.py`](usage_stats.py) (such as `voice transcribed`, `transcript cleanup`, `history capture`, `dossier update`, `owner panel`, `settings changed`, or a command such as `history stats`), and `error_occurred` with an error type or code only (such as `stt.failed` or `dossier.timeout`). Each event goes at most once a UTC day. Every event carries the Telesec version, the OS and its version, the CPU architecture, the Python version, `channel` and `mode` (both `plugin`), and a random install ID.
 - **Never sent.** Message text, transcripts, captions, contact or chat names, chat, user, or connection IDs, file names, paths, settings values, keys, or the text of an error.
 - **The notice.** The gateway sends it once, while the owner has not chosen, at the next Business message or when the owner opens the owner panel or Settings. Only an owner of every connected account gets it, because only that owner can switch usage stats in Settings. It is recorded as sent only once Telegram has accepted it.

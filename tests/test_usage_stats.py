@@ -143,38 +143,57 @@ def test_nothing_is_sent_by_default(usage):
 
 
 ID = "8b0e6c1a-3f0d-4a51-9a7e-2f1c5d9e4b77"
+UNSET = object()
 
 
-@pytest.mark.parametrize(("legacy", "on"), [
-    ({"id": ID, "enabled": None, "notice": 1, "installed": True, "daily": {}}, False),  # 0.17 after its notice
-    ({"id": ID, "notice": 1}, False),
-    ({"id": ID, "enabled": True, "notice": 1, "installed": True, "daily": {}}, True),  # the owner turned it on
-    ({"id": None, "enabled": False, "notice": 1, "installed": False, "daily": {}}, False),  # the owner turned it off
-])
-def test_an_update_keeps_only_the_owners_explicit_choice(usage, legacy, on):
+@pytest.mark.parametrize("enabled", [None, UNSET, False, True], ids=["null", "missing", "off", "on"])
+@pytest.mark.parametrize("env", [None, ("TELESEC_TELEMETRY", "1"), ("TELESEC_TELEMETRY", "on"),
+                                 ("TELESEC_TELEMETRY", "true"), ("TELESEC_TELEMETRY", "debug"),
+                                 ("TELESEC_TELEMETRY", "0"), ("DO_NOT_TRACK", "1")],
+                         ids=["unset", "1", "on", "true", "debug", "0", "dnt"])
+def test_only_the_owners_stored_choice_turns_usage_stats_on(usage, monkeypatch, enabled, env):
+    """A 0.17 install saw the notice (``notice: 1``); only an owner's on counts, whatever the variable says."""
+    legacy = {"id": ID, "notice": 1, "installed": True, "daily": {}}
+    if enabled is not UNSET:
+        legacy["enabled"] = enabled
     path = Path(usage.client.status()["stateFile"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(legacy), encoding="utf-8")
-
-    usage.module.started()
-    usage.module.feature("voice transcribed")
-
-    assert usage.module._status()["enabled"] is on
-    assert events(usage) == ([("app_started", None), ("feature_used", "voice transcribed")] if on else [])
-    assert usage.module._offer_due() is ("enabled" not in legacy or legacy["enabled"] is None)
-
-
-def test_the_variable_alone_does_not_turn_usage_stats_on(usage, monkeypatch):
-    monkeypatch.setenv("TELESEC_TELEMETRY", "1")
+    if env:
+        monkeypatch.setenv(*env)
     restart(usage)
 
     usage.module.started()
-    assert usage.sent == [] and usage.module._status()["reason"] == "default"
-    assert usage.module.panel_row(None, 0, "settings") == OFF_ROW  # the owner can still turn it on
+    usage.module.feature("voice transcribed")
+    usage.module.error("stt.failed")
 
-    assert usage.client.set_enabled(True)
+    veto = env in (("TELESEC_TELEMETRY", "0"), ("DO_NOT_TRACK", "1"))
+    on = enabled is True and not veto
+    assert usage.module._status()["enabled"] is on
+    assert events(usage) == ([("app_started", None), ("feature_used", "voice transcribed"),
+                              ("error_occurred", "stt.failed")] if on else [])
+    assert (usage.module.panel_row(None, 0, "settings") is None) is veto  # the owner can switch unless vetoed
+    assert usage.module._offer_due() is (not veto and enabled in (None, UNSET))
+
+
+@pytest.mark.parametrize("value", ["1", "on", "true"])
+def test_the_variable_neither_turns_usage_stats_on_nor_keeps_them_on(usage, plugin, monkeypatch, value):
+    monkeypatch.setenv("TELESEC_TELEMETRY", value)
+    restart(usage)
+    usage.module.started()
+    assert usage.sent == [] and usage.module._status()["reason"] == "default"
+
+    assert ttm.run_cli(plugin, "telemetry", "on")[0] == 0
     usage.module.started()
     assert events(usage) == [("app_installed", None), ("app_started", None)]
+
+    _code, output = ttm.run_cli(plugin, "telemetry", "off")
+    assert "note:" not in output
+    restart(usage)
+    usage.module.started()
+    usage.module.feature("voice transcribed")
+    assert len(usage.sent) == 2
+    assert (usage.module._status()["enabled"], usage.module._status()["reason"]) == (False, "state")
 
 
 def test_events_carry_fixed_names_and_error_types_only(usage):
@@ -444,14 +463,15 @@ def test_cli_off_deletes_the_id_and_on_opts_in(usage, plugin):
     assert status == current
 
 
-def test_cli_off_names_the_variable_that_keeps_it_on(usage, plugin, monkeypatch):
-    monkeypatch.setenv("TELESEC_TELEMETRY", "1")
+def test_cli_on_names_the_variable_that_keeps_it_off(usage, plugin, monkeypatch):
+    monkeypatch.setenv("TELESEC_TELEMETRY", "0")
     usage.module.reset()
-    assert ttm.run_cli(plugin, "telemetry", "on")[0] == 0
 
-    _code, output = ttm.run_cli(plugin, "telemetry", "off")
+    _code, output = ttm.run_cli(plugin, "telemetry", "on")
 
-    assert "note: set by TELESEC_TELEMETRY, so this environment keeps them on." in output
+    assert "note: set by TELESEC_TELEMETRY, so this environment keeps them off." in output
+    usage.module.started()
+    assert usage.sent == []
 
 
 @pytest.mark.parametrize(("argv", "expected"), [

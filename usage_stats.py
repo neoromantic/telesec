@@ -232,18 +232,32 @@ def register_strings() -> None:
 
 
 def _status() -> dict[str, Any]:
-    """The client's status with Telesec's opt-in rule: on only after the owner turned it on.
+    """The client's status with Telesec's opt-in rule: on only while the owner's stored choice is on.
 
-    The client is on by default, and once its notice is seen. An install that never stored ``enabled: true``
-    (a new one, or one from 0.17 that only saw the notice) is off, and so is ``TELESEC_TELEMETRY=1`` until
-    the owner turns it on; both report ``default``, so Settings shows the switch.
+    The client is on by default, under ``TELESEC_TELEMETRY=1|on|true|debug``, and once its notice is seen, so
+    those count for nothing here: only ``enabled: true`` with the notice marked seen, which ``set_enabled(True)``
+    writes, is consent. An off from the client (``TELESEC_TELEMETRY=0``, ``DO_NOT_TRACK``, CI, a test run, a
+    development version) stays a veto. Without a stored choice the reason is ``default``, so Settings shows the
+    switch and the notice is due.
     """
     if _client is None:
         return {"enabled": False, "reason": "error"}
     current = _client.status()
-    if current["enabled"] and (current["reason"] == "default" or _client.notice_text() is not None):
-        return {**current, "enabled": False, "reason": "default"}
-    return current
+    if not current["enabled"]:
+        return current
+    state = _stored()
+    notice = state.get("notice")
+    on = state.get("enabled") is True and type(notice) is int and notice >= _telemetry.NOTICE_VERSION
+    return {**current, "enabled": on, "reason": "state" if isinstance(state.get("enabled"), bool) else "default"}
+
+
+def _stored() -> dict[str, Any]:
+    """``telemetry.json`` as the owner's choices left it; empty when missing or unreadable."""
+    try:
+        state = json.loads(Path(_client.state_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
 
 
 def panel_lines(language_code: str | None) -> list[str]:
@@ -460,9 +474,8 @@ def handle_cli(args: argparse.Namespace) -> int:
             print(json.dumps(current, ensure_ascii=True, indent=2))
             return 0
         print(f"usage stats: {action}" + ("" if on else "; the install id and daily counters are deleted"))
-        if current["enabled"] is not on:
-            print(f"note: {REASON_TEXT.get(current['reason'], current['reason'])}, so this environment keeps them "
-                  f"{'off' if current['enabled'] is False else 'on'}.")
+        if on and not current["enabled"]:
+            print(f"note: {REASON_TEXT.get(current['reason'], current['reason'])}, so this environment keeps them off.")
         print("The gateway applies it at its next event; no restart is needed.")
         return 0
     current = _status()
