@@ -39,8 +39,8 @@ OFF_ROW = [("Share usage stats", "tb:s:0:settings/u.on"), ("• Don't share", "t
 
 @pytest.fixture
 def usage(plugin, modes, monkeypatch):
-    """The plugin's usage stats with the environment out of the way: on by default, behind the notice. Events are
-    recorded in ``usage.sent``, never sent."""
+    """The plugin's usage stats with the environment out of the way: off until the owner turns them on. Events
+    are recorded in ``usage.sent``, never sent."""
     for name in ENV:
         monkeypatch.delenv(name, raising=False)
     module = plugin._usage_stats
@@ -61,9 +61,19 @@ def _state(client) -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
-def seen_elsewhere(usage) -> None:
-    """The notice was seen in another process (the one that shows it sends nothing itself)."""
-    usage.module.create_client(version="1.2.3").mark_notice_seen()
+def turned_on(usage) -> None:
+    """The owner turned usage stats on (`hermes telesec telemetry on` in another process)."""
+    assert usage.module.create_client(version="1.2.3").set_enabled(True)
+
+
+def restart(usage) -> None:
+    """A new gateway run."""
+    usage.module.reset()
+    usage.client = usage.module.setup(version="1.2.3")
+
+
+def offer_file(usage) -> Path:
+    return Path(usage.client.status()["stateFile"]).with_name("usage-notice-sent")
 
 
 def events(usage) -> list[tuple[str, str | None]]:
@@ -122,17 +132,53 @@ def test_the_environment_turns_it_off(usage, monkeypatch, name, value, reason):
     assert usage.sent == []
 
 
-def test_nothing_is_sent_before_the_notice(usage):
+def test_nothing_is_sent_by_default(usage):
     usage.module.started()
     usage.module.feature("voice transcribed")
     usage.module.error("stt.failed")
 
     assert usage.sent == []
     assert usage.state() == {}
+    assert (usage.module._status()["enabled"], usage.module._status()["reason"]) == (False, "default")
+
+
+ID = "8b0e6c1a-3f0d-4a51-9a7e-2f1c5d9e4b77"
+
+
+@pytest.mark.parametrize(("legacy", "on"), [
+    ({"id": ID, "enabled": None, "notice": 1, "installed": True, "daily": {}}, False),  # 0.17 after its notice
+    ({"id": ID, "notice": 1}, False),
+    ({"id": ID, "enabled": True, "notice": 1, "installed": True, "daily": {}}, True),  # the owner turned it on
+    ({"id": None, "enabled": False, "notice": 1, "installed": False, "daily": {}}, False),  # the owner turned it off
+])
+def test_an_update_keeps_only_the_owners_explicit_choice(usage, legacy, on):
+    path = Path(usage.client.status()["stateFile"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    usage.module.started()
+    usage.module.feature("voice transcribed")
+
+    assert usage.module._status()["enabled"] is on
+    assert events(usage) == ([("app_started", None), ("feature_used", "voice transcribed")] if on else [])
+    assert usage.module._offer_due() is ("enabled" not in legacy or legacy["enabled"] is None)
+
+
+def test_the_variable_alone_does_not_turn_usage_stats_on(usage, monkeypatch):
+    monkeypatch.setenv("TELESEC_TELEMETRY", "1")
+    restart(usage)
+
+    usage.module.started()
+    assert usage.sent == [] and usage.module._status()["reason"] == "default"
+    assert usage.module.panel_row(None, 0, "settings") == OFF_ROW  # the owner can still turn it on
+
+    assert usage.client.set_enabled(True)
+    usage.module.started()
+    assert events(usage) == [("app_installed", None), ("app_started", None)]
 
 
 def test_events_carry_fixed_names_and_error_types_only(usage):
-    seen_elsewhere(usage)
+    turned_on(usage)
 
     usage.module.started()
     usage.module.feature("voice transcribed")
@@ -151,7 +197,7 @@ def test_events_carry_fixed_names_and_error_types_only(usage):
 
 
 def test_each_event_goes_once_a_day(usage):
-    seen_elsewhere(usage)
+    turned_on(usage)
 
     for _ in range(3):
         usage.module.transcribed("voice", cleaned=True)
@@ -164,7 +210,7 @@ def test_each_event_goes_once_a_day(usage):
 
 
 def test_dossier_cycles_count_updates_and_failure_codes(usage, plugin):
-    seen_elsewhere(usage)
+    turned_on(usage)
     report = plugin._dossier_support.CycleReport(refreshed=2, failures=[("contact 1", "timeout"),
                                                                         ("contact 2", "TimeoutError")])
 
@@ -190,7 +236,7 @@ def test_dossier_cycles_count_updates_and_failure_codes(usage, plugin):
     ("tb:b:991", None),
 ])
 def test_panel_taps_map_to_fixed_names(usage, plugin, data, expected):
-    seen_elsewhere(usage)
+    turned_on(usage)
     parsed = plugin._owner_panel.parse_callback(data)
 
     usage.module.panel_action(parsed.action, parsed.arg, parsed.section, parsed.sub)
@@ -213,18 +259,23 @@ async def test_the_gateway_sends_the_notice_once_to_the_owner(usage, plugin):
 
     (call,) = bot.calls
     assert call["chat_id"] == OWNER and call["parse_mode"] == "HTML"
-    assert call["text"].startswith("telesec shares usage stats with its author")
-    assert "<code>hermes telesec telemetry off</code>" in call["text"]
-    assert "<code>DO_NOT_TRACK=1</code>" in call["text"] and "https://usage.sergeybaus.com" in call["text"]
-    assert top.keyboard(call["reply_markup"]) == [[("Turn off usage stats", "tb:s:0:settings/u.off")]]
-    assert usage.state()["notice"] == 1
-    # The process that showed the notice sends nothing; the next gateway start does.
+    assert call["text"].startswith("Telesec can share usage stats with its author")
+    assert "Usage stats are off: nothing is sent unless you turn them on" in call["text"]
+    assert "<code>hermes telesec telemetry on</code>" in call["text"] and "https://usage.sergeybaus.com" in call["text"]
+    assert top.keyboard(call["reply_markup"]) == [[("Enable usage stats", "tb:s:0:settings/u.on")]]
+    assert offer_file(usage).exists()
+    # Sending the notice turns nothing on, in this gateway run or the next, and it is not sent again.
     usage.module.started()
-    assert usage.sent == []
+    restart(usage)
+    usage.module.started()
+    usage.module.feature("voice transcribed")
+    usage.module.offer_notice(bot, BCID)
+    await settle(usage)
+    assert usage.sent == [] and usage.state() == {} and len(bot.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_an_undelivered_notice_is_not_marked_seen(usage, plugin):
+async def test_an_undelivered_notice_is_tried_again(usage, plugin):
     top.bind_owner(plugin)
     bot = top.PanelBot(business_owner_id=OWNER)
     bot.send_error = RuntimeError("Forbidden: bot can't initiate conversation with a user")
@@ -235,13 +286,12 @@ async def test_an_undelivered_notice_is_not_marked_seen(usage, plugin):
     await settle(usage)
 
     assert len(bot.calls) == 1
-    assert usage.client.notice_text() is not None
-    assert usage.state().get("notice", 0) == 0
+    assert not offer_file(usage).exists()
 
     bot.send_error = None
     usage.module.offer_notice(bot, BCID, owner_id=OWNER, interactive=True)  # the owner opened the panel
     await settle(usage)
-    assert len(bot.delivered_calls) == 1 and usage.state()["notice"] == 1
+    assert len(bot.delivered_calls) == 1 and offer_file(usage).exists()
 
 
 @pytest.mark.asyncio
@@ -254,14 +304,17 @@ async def test_the_notice_goes_only_to_an_owner_who_manages_settings(usage, plug
     await settle(usage)
 
     assert bot.calls == []
-    assert usage.client.notice_text() is not None
+    assert not offer_file(usage).exists()
 
 
 @pytest.mark.asyncio
-async def test_nothing_is_offered_while_usage_stats_are_off(usage, plugin, monkeypatch):
-    monkeypatch.setenv("TELESEC_TELEMETRY", "0")
-    usage.module.reset()
-    usage.module.setup(version="1.2.3")
+@pytest.mark.parametrize("decided", ["variable", "off", "on"])
+async def test_nothing_is_offered_once_decided(usage, plugin, monkeypatch, decided):
+    if decided == "variable":
+        monkeypatch.setenv("TELESEC_TELEMETRY", "0")
+        restart(usage)
+    else:
+        assert usage.client.set_enabled(decided == "on")
     top.bind_owner(plugin)
     bot = top.PanelBot(business_owner_id=OWNER)
 
@@ -280,27 +333,22 @@ async def test_telesec_opens_settings_then_the_notice(usage, gs, plugin):
     await settle(usage)
 
     settings, notice = bot.calls
-    assert "\nUsage stats: on\nDossier model:" in settings["text"]
-    assert top.keyboard(settings["reply_markup"])[-1] == SWITCH_ROW
-    assert notice["text"].startswith("telesec shares usage stats") and usage.state()["notice"] == 1
+    assert "\nUsage stats: off\nDossier model:" in settings["text"]
+    assert top.keyboard(settings["reply_markup"])[-1] == OFF_ROW
+    assert notice["text"].startswith("Telesec can share usage stats") and offer_file(usage).exists()
+    assert usage.state() == {} and usage.sent == []
 
 
 # --- Settings -------------------------------------------------------------------------------------
 
 
-def test_settings_turns_usage_stats_off_and_on(usage, gs, plugin):
+def test_settings_turns_usage_stats_on_and_off(usage, gs, plugin):
     panel = plugin._settings_panel
     top.bind_owner(plugin)
 
     view = panel.render(ts.ctx(plugin))
-    assert "Usage stats: on" in view.text.splitlines()
-    assert ts.rows(view)[-1] == SWITCH_ROW
-
-    off = panel.render(ts.ctx(plugin, arg="u.off"))
-    assert off.text.splitlines()[1] == "Usage stats are off."
-    assert "Usage stats: off" in off.text.splitlines() and ts.rows(off)[-1] == OFF_ROW
-    assert usage.client.status()["reason"] == "state" and usage.state()["enabled"] is False
-    assert usage.client.notice_text() is None
+    assert "Usage stats: off" in view.text.splitlines()
+    assert ts.rows(view)[-1] == OFF_ROW
 
     on = panel.render(ts.ctx(plugin, arg="u.on", lang="ru"))
     assert on.text.splitlines()[1] == "Статистика использования включена."
@@ -309,18 +357,26 @@ def test_settings_turns_usage_stats_off_and_on(usage, gs, plugin):
     usage.module.feature("settings")
     assert events(usage) == [("app_installed", None), ("feature_used", "settings")]
 
+    off = panel.render(ts.ctx(plugin, arg="u.off"))
+    assert off.text.splitlines()[1] == "Usage stats are off."
+    assert "Usage stats: off" in off.text.splitlines() and ts.rows(off)[-1] == OFF_ROW
+    assert usage.client.status()["reason"] == "state" and usage.state()["enabled"] is False
+    usage.module.feature("settings changed")
+    assert len(usage.sent) == 2
+
 
 @pytest.mark.asyncio
-async def test_the_notice_button_turns_usage_stats_off(usage, gs, plugin):
+async def test_the_notice_button_turns_usage_stats_on(usage, gs, plugin):
     top.bind_owner(plugin)
     bot = top.PanelBot(business_owner_id=OWNER)
 
-    assert await top.dispatch(plugin, top.callback_update("tb:s:0:settings/u.off"), bot) is True
+    assert await top.dispatch(plugin, top.callback_update("tb:s:0:settings/u.on"), bot) is True
 
     text, keyboard = top.last_edit(bot)
-    assert text.splitlines()[1] == "Usage stats are off."
-    assert keyboard[-1] == OFF_ROW
-    assert usage.client.status()["enabled"] is False
+    assert text.splitlines()[1] == "Usage stats are on."
+    assert keyboard[-1] == SWITCH_ROW
+    assert usage.module._status() | {"id": None} == usage.client.status() | {"enabled": True, "reason": "state",
+                                                                               "id": None}
 
 
 def test_settings_names_the_variable_that_decides(usage, gs, plugin, monkeypatch):
@@ -340,6 +396,7 @@ def test_settings_names_the_variable_that_decides(usage, gs, plugin, monkeypatch
 
 
 def test_another_owner_cannot_switch_usage_stats(usage, gs, plugin):
+    turned_on(usage)
     top.bind_owner(plugin)
     top.bind_owner(plugin, PEER, OTHER, seen_chat=None)
 
@@ -347,36 +404,30 @@ def test_another_owner_cannot_switch_usage_stats(usage, gs, plugin):
 
     assert view.text.splitlines()[1] == plugin._owner_panel.tr("not_allowed")
     assert "Usage stats: on" in view.text.splitlines() and view.buttons == []
-    assert usage.client.status()["enabled"] is True
+    assert usage.module._status()["enabled"] is True
 
 
 # --- CLI ------------------------------------------------------------------------------------------
 
 
-def test_cli_status_in_a_pipe_shows_the_notice_but_keeps_it_due(usage, plugin):
-    exit_code, output = ttm.run_cli(plugin, "telemetry")  # stdout is no terminal and no agent runs it
-
-    assert exit_code == 0 and "telesec shares usage stats with its author" in output
-    assert usage.state() == {} and usage.client.notice_text() is not None
-
-
-def test_cli_status_shows_the_notice_once_and_marks_it_seen(usage, plugin, monkeypatch):
-    monkeypatch.setattr(usage.client, "agent", "codex")  # an AI agent reads the output
+def test_cli_output_read_by_an_agent_turns_nothing_on(usage, plugin, monkeypatch):
+    monkeypatch.setattr(usage.client, "agent", "codex")  # an AI agent runs the commands and reads the output
     exit_code, output = ttm.run_cli(plugin, "telemetry")
 
     assert exit_code == 0
     lines = output.splitlines()
-    assert lines[0] == "usage stats: on (on by default)"
-    assert "telesec shares usage stats with its author" in output
+    assert lines[0] == "usage stats: off (off until you turn them on)"
+    assert "What is sent: https://usage.sergeybaus.com" in output
+    assert "Turn on: 'hermes telesec telemetry on' or Usage stats in Settings" in output
     assert "Turn off: 'hermes telesec telemetry off', TELESEC_TELEMETRY=0 or DO_NOT_TRACK=1" in output
-    assert usage.state()["notice"] == 1
 
-    _code, again = ttm.run_cli(plugin, "telemetry", "status")
-    assert "shares usage stats" not in again and "What is sent: https://usage.sergeybaus.com" in again
+    assert ttm.run_cli(plugin, "history", "stats")[0] == 0
+    assert json.loads(ttm.run_cli(plugin, "telemetry", "--json")[1])["enabled"] is False
+    assert usage.state() == {} and usage.sent == []
 
 
 def test_cli_off_deletes_the_id_and_on_opts_in(usage, plugin):
-    seen_elsewhere(usage)
+    turned_on(usage)
     usage.module.started()
     assert usage.state()["id"]
 
@@ -390,12 +441,13 @@ def test_cli_off_deletes_the_id_and_on_opts_in(usage, plugin):
     assert set(current) == {"enabled", "debug", "reason", "id", "stateFile", "endpoint"}
 
     status = json.loads(ttm.run_cli(plugin, "telemetry", "--json")[1])
-    assert status["notice"] is None and status["id"] == current["id"]
+    assert status == current
 
 
 def test_cli_off_names_the_variable_that_keeps_it_on(usage, plugin, monkeypatch):
     monkeypatch.setenv("TELESEC_TELEMETRY", "1")
     usage.module.reset()
+    assert ttm.run_cli(plugin, "telemetry", "on")[0] == 0
 
     _code, output = ttm.run_cli(plugin, "telemetry", "off")
 
@@ -427,7 +479,7 @@ def test_cli_commands_map_to_their_subcommand_path(plugin, argv, expected):
 
 
 def test_a_cli_command_counts_once(usage, plugin):
-    seen_elsewhere(usage)
+    turned_on(usage)
 
     assert ttm.run_cli(plugin, "history", "stats")[0] == 0
     assert ttm.run_cli(plugin, "history", "stats")[0] == 0

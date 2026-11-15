@@ -1,17 +1,19 @@
-"""Usage stats: opt-out usage counts through the shared client in ``telemetry.py``.
+"""Usage stats: opt-in usage counts through the shared client in ``telemetry.py``.
 
 Sent to the maintainer (PostHog through https://usage.sergeybaus.com): ``app_started`` when the gateway
 starts, ``feature_used`` with a name from ``FEATURES``, and ``error_occurred`` with an error code only,
 never its text. In the ``plugin`` mode each event goes at most once a UTC day per feature or code. Never
 message text, transcripts, captions, names, chat, user or connection ids, paths, or settings values.
 
-Nothing is sent until the owner has seen the notice. The gateway sends it once to an owner who manages
-Settings, in their private chat with the bot, with a button that turns usage stats off; it is marked seen
-only after Telegram accepted it, and that gateway process sends nothing until its next start. A terminal
-run of ``hermes telesec`` prints it once to stderr, and ``hermes telesec telemetry status`` shows it.
+Usage stats are off until the owner turns them on: **Share usage stats** in Settings (``/telesec``), the
+notice's **Enable usage stats** button, or ``hermes telesec telemetry on``. Each calls ``set_enabled(True)``,
+which stores ``enabled: true`` and marks the client's notice seen. The managed client is opt-out: on by
+default, it sends once its notice is marked seen. So this module sends only while ``_status()`` says on and
+never calls ``show_notice()`` or ``mark_notice_seen()``: showing or reading text is not consent. The gateway
+sends its own notice once to an owner who manages Settings, recorded in ``OFFER_FILE``.
 
 Off switches: ``TELESEC_TELEMETRY=0``, ``DO_NOT_TRACK=1``, ``hermes telesec telemetry off``, and Usage
-stats in Settings (``/telesec``). The client never raises, never blocks, and is off in CI and tests.
+stats in Settings. The client never raises, never blocks, and is off in CI and tests.
 """
 
 from __future__ import annotations
@@ -22,7 +24,6 @@ import html
 import json
 import logging
 import re
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -64,11 +65,12 @@ _PANEL_SECTIONS = {"stats": "panel stats", "dossier": "panel dossier", "settings
 # Settings buttons: "u.<target value>", like the other switches.
 PANEL_ARGS = ("u.on", "u.off")
 NOTICE_RETRY_SECONDS = 15 * 60
+OFFER_FILE = "usage-notice-sent"  # next to telemetry.json: the gateway sent the opt-in notice
 # Rules the environment decides; Telegram and `telemetry on|off` cannot change them.
 ENV_REASONS = {"no-endpoint": "no endpoint", "do-not-track": "DO_NOT_TRACK", "env": ENV_NAME, "ci": "CI",
                "test": "a test run", "dev-version": "a development version"}
 REASON_TEXT = {
-    "default": "on by default",
+    "default": "off until you turn them on",
     "state": "set with 'hermes telesec telemetry on|off' or Settings",
     "env": f"set by {ENV_NAME}",
     "do-not-track": "DO_NOT_TRACK is set",
@@ -89,7 +91,11 @@ STRINGS = {
         "usage.done.off": "Usage stats are off.",
         "usage.env": "Usage stats are set by {name} on the gateway.",
         "usage.save_error": "Couldn't save the usage stats switch.",
-        "usage.notice.off": "Turn off usage stats",
+        "usage.notice": "Telesec can share usage stats with its author: how often it runs, which features are "
+                        "used, error codes, version and OS, tied to a random install ID. Never message text, "
+                        "transcripts, names, or chat IDs. Usage stats are off: nothing is sent unless you turn them "
+                        "on with the button below, in Settings, or with `hermes telesec telemetry on`. Details: {url}",
+        "usage.notice.on": "Enable usage stats",
     },
     "ru": {
         "usage.status": "Статистика использования: {state}",
@@ -100,7 +106,12 @@ STRINGS = {
         "usage.done.off": "Статистика использования выключена.",
         "usage.env": "Статистику использования на этом сервере задаёт {name}.",
         "usage.save_error": "Не удалось сохранить переключатель статистики.",
-        "usage.notice.off": "Выключить статистику",
+        "usage.notice": "Telesec может отправлять автору статистику использования: как часто он работает, какие "
+                        "функции используются, коды ошибок, версию и ОС, со случайным ID установки. Никогда — текст "
+                        "сообщений, расшифровки, имена или ID чатов. Статистика выключена: ничего не отправляется, "
+                        "пока вы не включите её кнопкой ниже, в настройках или командой "
+                        "`hermes telesec telemetry on`. Подробности: {url}",
+        "usage.notice.on": "Включить статистику",
     },
 }
 
@@ -161,19 +172,23 @@ def client() -> _telemetry.Telemetry | None:
 # --- Events ----------------------------------------------------------------------------------------
 
 
+def _sharing() -> bool:
+    return _client is not None and _status()["enabled"]
+
+
 def started() -> None:
-    if _client is not None:
+    if _sharing():
         _client.started()
 
 
 def feature(name: str) -> None:
-    if _client is not None:
+    if _sharing():
         _client.feature(name)
 
 
 def error(code: Any) -> None:
     """An error code or exception, sent as its type only: in Telesec an error's text can quote chat content."""
-    if _client is None:
+    if not _sharing():
         return
     kind = code if isinstance(code, str) else type(code).__name__
     _client.error(kind, "")
@@ -217,9 +232,18 @@ def register_strings() -> None:
 
 
 def _status() -> dict[str, Any]:
+    """The client's status with Telesec's opt-in rule: on only after the owner turned it on.
+
+    The client is on by default, and once its notice is seen. An install that never stored ``enabled: true``
+    (a new one, or one from 0.17 that only saw the notice) is off, and so is ``TELESEC_TELEMETRY=1`` until
+    the owner turns it on; both report ``default``, so Settings shows the switch.
+    """
     if _client is None:
         return {"enabled": False, "reason": "error"}
-    return _client.status()
+    current = _client.status()
+    if current["enabled"] and (current["reason"] == "default" or _client.notice_text() is not None):
+        return {**current, "enabled": False, "reason": "default"}
+    return current
 
 
 def panel_lines(language_code: str | None) -> list[str]:
@@ -267,15 +291,15 @@ def panel_apply(arg: str, language_code: str | None) -> str:
 
 
 def notice_html(text: str) -> str:
-    """The client's notice as Telegram HTML: `code` spans become <code>."""
+    """The notice as Telegram HTML: `code` spans become <code>."""
     return re.sub(r"`([^`]+)`", r"<code>\1</code>", html.escape(text, quote=False))
 
 
 def _notice_markup(language_code: str | None) -> Any:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-    data = _owner_panel.section_callback(_owner_panel.HOME_CHAT, _owner_panel.SETTINGS_SECTION, "u.off")
-    return InlineKeyboardMarkup([[InlineKeyboardButton(_owner_panel.tr("usage.notice.off", language_code),
+    data = _owner_panel.section_callback(_owner_panel.HOME_CHAT, _owner_panel.SETTINGS_SECTION, "u.on")
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_owner_panel.tr("usage.notice.on", language_code),
                                                        callback_data=data)]])
 
 
@@ -298,11 +322,12 @@ def update_connection(update: Any) -> Any:
 
 def offer_notice(bot: Any, connection: Any, *, owner_id: Any = None, language_code: str | None = None,
                  interactive: bool = False) -> None:
-    """Send the notice once to the owner of ``connection`` when it is due (gateway). Never raises.
+    """Send the opt-in notice once to the owner of ``connection`` while usage stats are off and undecided
+    (gateway). Never raises.
 
     ``owner_id`` is a verified owner (the panel or Settings), else the connection's owner is looked up. Only an
     owner who manages Settings (an owner of every known connection) gets it, since they are the one who can
-    turn usage stats off there. A failed proactive attempt waits ``NOTICE_RETRY_SECONDS``; an owner's own
+    turn usage stats on there. A failed proactive attempt waits ``NOTICE_RETRY_SECONDS``; an owner's own
     panel or Settings tap (``interactive``) tries again at once.
     """
     global _notice_busy
@@ -321,13 +346,26 @@ def offer_notice(bot: Any, connection: Any, *, owner_id: Any = None, language_co
         logger.debug("%s: usage stats notice not scheduled (%s)", _history.PLUGIN_NAME, type(exc).__name__)
 
 
+def _offer_file() -> Path:
+    return Path(_client.state_file).with_name(OFFER_FILE)
+
+
+def _offer_due() -> bool:
+    """Undecided (no owner choice, no variable or CI rule) and the notice not sent yet."""
+    return _client is not None and _status()["reason"] == "default" and not _offer_file().exists()
+
+
+def _offer_sent() -> None:
+    path = _offer_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+
+
 async def _deliver(bot: Any, connection: str, owner_id: Any, language_code: str | None) -> bool:
     global _notice_done, _notice_busy, _notice_next_try
     try:
-        client_ = _client
-        text = await asyncio.to_thread(client_.notice_text) if client_ is not None else None
-        if text is None:
-            _notice_done = True  # off, or already seen
+        if not await asyncio.to_thread(_offer_due):
+            _notice_done = True  # decided, or already sent
             return False
         if owner_id is None:
             owner_id, _reason = await _history.resolve_business_owner(bot, connection)
@@ -336,10 +374,11 @@ async def _deliver(bot: Any, connection: str, owner_id: Any, language_code: str 
         if owner_id is None or not await asyncio.to_thread(dossier_panel.manages_global, owner_id, connection):
             _notice_next_try = time.monotonic() + NOTICE_RETRY_SECONDS
             return False
+        text = _owner_panel.tr("usage.notice", language_code, url=DETAILS_URL)
         await bot.send_message(chat_id=int(str(owner_id)), text=notice_html(text), parse_mode="HTML",
                                reply_markup=_notice_markup(language_code), **_no_link_preview())
-        # Seen only once Telegram accepted it. This process then sends nothing until the gateway restarts.
-        await asyncio.to_thread(client_.mark_notice_seen)
+        # Recorded only once Telegram accepted it. It turns nothing on: only the button or Settings does.
+        await asyncio.to_thread(_offer_sent)
         _notice_done = True
         logger.info("%s: usage stats notice sent to the owner", _history.PLUGIN_NAME)
         return True
@@ -355,7 +394,7 @@ async def _deliver(bot: Any, connection: str, owner_id: Any, language_code: str 
 
 
 def add_parser(subs: Any) -> None:
-    parser = subs.add_parser("telemetry", help="Show or change usage stats (on unless turned off)")
+    parser = subs.add_parser("telemetry", help="Show or change usage stats (off unless turned on)")
     parser.add_argument("action", nargs="?", choices=("status", "on", "off"), default="status")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument("--json", dest="format", action="store_const", const="json", help="Same as --format json")
@@ -380,10 +419,7 @@ def cli_feature(args: argparse.Namespace) -> str | None:
 
 
 def before_cli(args: argparse.Namespace) -> None:
-    """Print the notice once in a terminal (stderr), then count the subcommand. Never raises."""
-    if _client is None:
-        return
-    _client.show_notice()
+    """Count the subcommand while usage stats are on. Never raises."""
     name = cli_feature(args)
     if name is not None:
         feature(name)
@@ -402,8 +438,9 @@ def _status_lines(current: dict[str, Any]) -> list[str]:
 
 def _footer() -> str:
     return (f"What is sent: {DETAILS_URL}\n"
-            f"Turn off: '{OFF_COMMAND}', {ENV_NAME}=0 or DO_NOT_TRACK=1 in the gateway's environment, or Usage "
-            "stats in Settings (/telesec in your private chat with the bot).")
+            "Turn on: 'hermes telesec telemetry on' or Usage stats in Settings (/telesec in your private chat with "
+            "the bot).\n"
+            f"Turn off: '{OFF_COMMAND}', {ENV_NAME}=0 or DO_NOT_TRACK=1 in the gateway's environment, or Settings.")
 
 
 def handle_cli(args: argparse.Namespace) -> int:
@@ -418,7 +455,7 @@ def handle_cli(args: argparse.Namespace) -> int:
         if not client_.set_enabled(on):
             print(f"error: could not write {client_.status()['stateFile'] or 'the state file'}")
             return 1
-        current = client_.status()
+        current = _status()
         if as_json:
             print(json.dumps(current, ensure_ascii=True, indent=2))
             return 0
@@ -428,24 +465,9 @@ def handle_cli(args: argparse.Namespace) -> int:
                   f"{'off' if current['enabled'] is False else 'on'}.")
         print("The gateway applies it at its next event; no restart is needed.")
         return 0
-    current = client_.status()
-    notice = client_.notice_text()
+    current = _status()
     if as_json:
-        print(json.dumps({**current, "notice": notice}, ensure_ascii=True, indent=2))
+        print(json.dumps(current, ensure_ascii=True, indent=2))
         return 0
-    lines = _status_lines(current)
-    if notice:
-        lines += ["", notice]
-    lines += ["", _footer()]
-    print("\n".join(lines))
-    if notice and (_reads_stdout() or client_.agent):
-        client_.mark_notice_seen()  # shown in full to a person in a terminal or to an AI agent
+    print("\n".join([*_status_lines(current), "", _footer()]))
     return 0
-
-
-def _reads_stdout() -> bool:
-    """Whether stdout is a terminal: a script, pipe, or ssh without a terminal has not shown anyone the notice."""
-    try:
-        return bool(sys.stdout.isatty())
-    except Exception:  # noqa: BLE001 - a closed or replaced stdout
-        return False

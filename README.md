@@ -34,7 +34,7 @@ Four switches cover all chats: transcription (on by default), history (off by de
 Telesec settings · all chats
 One chat: Manage Bot in that chat.
 Deletion alerts are paused while history is off.
-Usage stats: on
+Usage stats: off
 Dossier model: ai-gateway / google/gemini-3.8-flash
 Voice cleanup: gemini / gemini-3.8-flash
 [🎙️ Transcription ✅]
@@ -42,7 +42,7 @@ Voice cleanup: gemini / gemini-3.8-flash
 [⏳ Keep history: forever ›]
 [📇 Dossiers ❌]
 [🔔 Deletion alerts ✅]
-[• Share usage stats] [Don't share]
+[Share usage stats] [• Don't share]
 ```
 
 Each feature is one button with its emoji and state: tap ✅ to turn it off, ❌ to turn it on.
@@ -64,7 +64,7 @@ A change applies to the next update; no restart is needed. To turn history, the 
 
 **⏳ Keep history: forever ›** shows how long saved history is kept and opens a picker: **Forever · 1 year · 90 days · 30 days**, and **‹ Settings** to go back. A shorter time asks first; a longer one applies at once. History is deleted a whole month at a time: once all of a month is older than the chosen time, the next cleanup deletes it, so the current month always stays. Cleanup runs when the gateway starts, when a `hermes` command loads Telesec (such as `hermes telesec settings`), and at most hourly while Business messages arrive. The button stays while history is off, because cleanup keeps running. In the terminal, `hermes telesec settings set retention N` sets any number of days, and the picker shows such a value as its own button (for example `• 45 days`) until you pick another. See [retention and removal](docs/HISTORY.md#retention-and-removal).
 
-The `Usage stats:` line and the **Share usage stats · Don't share** row switch [usage stats](#usage-stats) for this gateway. While `TELESEC_TELEMETRY` or `DO_NOT_TRACK` in the gateway's environment decides, the line names the variable and the row is not shown.
+The `Usage stats:` line and the **Share usage stats · Don't share** row switch [usage stats](#usage-stats) for this gateway; they are off until you tap **Share usage stats**. While `TELESEC_TELEMETRY` or `DO_NOT_TRACK` in the gateway's environment decides, the line names the variable and the row is not shown.
 
 The last lines show the model that writes dossiers (`your main model` when its task follows the main model) and the model that cleans up voice transcripts (or `off`), as configured. They are read-only: choose the dossier model with `hermes model` → Telesec dossiers ([dossier model](#dossier-model)) and the cleanup model in the [configuration](#configuration). A warning line follows the dossier model when its `extra_body` still has the gateway-only `providerOptions` on another provider.
 
@@ -411,7 +411,7 @@ See the [Hermes plugin settings API](https://hermes-agent.nousresearch.com/docs/
 | `TELESEC_DOSSIER_BACKFILL_DAYS` | `90` | First-pass and tracking window for dossiers, in days; bounded to 1–3650. |
 | `TELESEC_DOSSIER_BACKFILL_MESSAGES` | `500` | First-build message cap per contact; bounded to 10–5000. |
 | `TELESEC_DOSSIER_MAX_CALLS_PER_MINUTE` | `20` | Dossier model calls per minute; bounded to 1–600. |
-| `TELESEC_TELEMETRY` | unset | [Usage stats](#usage-stats): `0`, `off`, or `false` turns them off and `1`, `on`, or `true` on, whatever Settings or `hermes telesec telemetry` say; `debug` prints each event to stderr instead of sending it. |
+| `TELESEC_TELEMETRY` | unset | [Usage stats](#usage-stats): `0`, `off`, or `false` keeps them off, whatever Settings or `hermes telesec telemetry` say. `1`, `on`, or `true` keeps them on once the owner has turned them on, and `debug` then prints each event to stderr instead of sending it; neither turns them on by itself. |
 | `DO_NOT_TRACK` | unset | Any value but `0` or `false` turns usage stats off, before `TELESEC_TELEMETRY`. |
 
 Boolean values accept `1`, `true`, `yes`, or `on` (case-insensitive).
@@ -552,7 +552,7 @@ Incoming messages, transcripts that do not fit in one caption, messages outside 
 
 ## Privacy and data
 
-- **Usage stats.** The plugin sends usage stats to the author through `https://usage.sergeybaus.com` (PostHog), on by default and only after the owner has seen the notice: event and feature names from a fixed list, error types, version and OS, and a random install ID, never message content, names, or IDs. Turn them off in Settings, with `hermes telesec telemetry off`, `TELESEC_TELEMETRY=0`, or `DO_NOT_TRACK=1`. See [Usage stats](#usage-stats). No self-updater is included.
+- **Usage stats.** Off by default. Only when the owner turns them on, in Settings or with `hermes telesec telemetry on`, the plugin sends usage stats to the author through `https://usage.sergeybaus.com` (PostHog): event and feature names from a fixed list, error types, version and OS, and a random install ID, never message content, names, or IDs. See [Usage stats](#usage-stats). No self-updater is included.
 - **Network.** The gateway's Telegram Bot API client downloads media, looks up Business owners, edits captions, sends transcripts/status messages and edits them in place after cleanup, sends deletion alerts to the owner's private chat with the bot, and handles owner-panel buttons. For the owner's `/dossier` it deletes that command and posts the contact's dossier into the same Business chat; when it posts nothing, the reason goes only to the owner's private chat with the bot. For the owner's `/stats` it edits that command into a stats card (`editMessageText` with a rich message), sends the card (`sendRichMessage`, else plain text) or a short notice into the same Business chat when the edit fails, and deletes the command and notice (`deleteBusinessMessages`). STT goes to the backend configured in Hermes, which may be local or external. Optional cleanup sends transcripts through `ctx.llm`; opt-in dossiers send retained private-chat text through the same host facade to their own [model task](#dossier-model), by default Vercel AI Gateway → Google with zero data retention, and Hermes may retry a failed call with its fallback chain or main model. When turned on, the dossier message check calls TypeSafe Jev through Vercel AI Gateway and fact extraction calls Cloudflare Workers AI, both directly over HTTPS. Provider retention and costs follow your selected backend. [Usage stats](#usage-stats) go over HTTPS to `https://usage.sergeybaus.com`. The plugin has no separate credential store and does not read credential files: the message check reads `AI_GATEWAY_API_KEY` and `AI_GATEWAY_BASE_URL`, and fact extraction `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`, through the Hermes secret scope of the active profile, and never stores or logs them.
 - **Local processes.** Attached-audio checks run `ffprobe` for duration and `ffmpeg` for prefix extraction and normalization, using argument lists without a shell. They operate on transient media in the active profile's cache.
 - **Background work.** Claimed transcription runs asynchronously. Opt-in history schedules deletion classification and maintenance; dossiers use a gateway background thread that starts on adapter connect even while they are off and then only checks the stored switch every minute. Once they are on, cycles start at least 3 minutes after connection and normally 30 minutes apart, and send eligible private-chat text to the dossier model without another prompt; disable dossiers to stop new cycles.
@@ -571,21 +571,22 @@ Incoming messages, transcripts that do not fit in one caption, messages outside 
 
 ## Usage stats
 
-Telesec sends usage stats to its author, so he can see how many installs run, which features they use, and which errors they hit. They are on by default and easy to turn off. The notice the owner gets once:
+Telesec can send usage stats to its author, so he can see how many installs run, which features they use, and which errors they hit. They are off by default, and nothing is sent until the owner turns them on. The notice the owner gets once in the private chat with the bot:
 
-> telesec shares usage stats with its author: how often it runs, which features are used, errors, version and OS, tied to a random install ID. It never sends your files, arguments or account names. Nothing has been sent yet. Turn it off with `hermes telesec telemetry off` or `DO_NOT_TRACK=1`. Details: https://usage.sergeybaus.com
+> Telesec can share usage stats with its author: how often it runs, which features are used, error codes, version and OS, tied to a random install ID. Never message text, transcripts, names, or chat IDs. Usage stats are off: nothing is sent unless you turn them on with the button below, in Settings, or with `hermes telesec telemetry on`. Details: https://usage.sergeybaus.com
 
+- **Turn them on.** Only the owner turns them on, with one of: **Enable usage stats** under the notice, **Share usage stats** in Settings (`/telesec`), or `hermes telesec telemetry on`. Getting or reading the notice, in Telegram or in a terminal, turns nothing on, and neither does `TELESEC_TELEMETRY=1`. An install updated from 0.17, which sent usage stats by default once the owner had seen its notice, stops sending; one where the owner turned them on keeps them on.
 - **What is sent.** `app_installed` once, `app_started` when the gateway starts, `feature_used` with a name from a fixed list in [`usage_stats.py`](usage_stats.py) (such as `voice transcribed`, `transcript cleanup`, `history capture`, `dossier update`, `owner panel`, `settings changed`, or a command such as `history stats`), and `error_occurred` with an error type or code only (such as `stt.failed` or `dossier.timeout`). Each event goes at most once a UTC day. Every event carries the Telesec version, the OS and its version, the CPU architecture, the Python version, `channel` and `mode` (both `plugin`), and a random install ID.
 - **Never sent.** Message text, transcripts, captions, contact or chat names, chat, user, or connection IDs, file names, paths, settings values, keys, or the text of an error.
-- **The notice.** Nothing is sent until the owner has seen the notice. The gateway sends it once to the owner in the private chat with the bot, with a **Turn off usage stats** button, at the next Business message or when the owner opens the owner panel or Settings. It counts as seen only once Telegram has accepted it, and that gateway run sends nothing; sending starts at the next gateway start. `hermes telesec telemetry status` shows the notice too, and a `hermes telesec` command in a terminal prints it once. Only an owner of every connected account gets it, because only that owner can switch it in Settings.
-- **Turn it off.** Any one of these: **Don't share** in Settings (`/telesec`), `hermes telesec telemetry off`, `TELESEC_TELEMETRY=0`, or `DO_NOT_TRACK=1` in the gateway's environment. Settings and the command apply at the gateway's next event, with no restart; a variable needs a restart. `off` deletes the install ID and the daily counters. Usage stats are also off in CI, in test runs, and in development versions.
+- **The notice.** The gateway sends it once, while the owner has not chosen, at the next Business message or when the owner opens the owner panel or Settings. Only an owner of every connected account gets it, because only that owner can switch usage stats in Settings. It is recorded as sent only once Telegram has accepted it.
+- **Turn them off.** Any one of these: **Don't share** in Settings, `hermes telesec telemetry off`, `TELESEC_TELEMETRY=0`, or `DO_NOT_TRACK=1` in the gateway's environment. Settings and the command apply at the gateway's next event, with no restart; a variable needs a restart. `off` deletes the install ID and the daily counters. Usage stats are also off in CI, in test runs, and in development versions.
 - **Where it goes.** Each event is one HTTPS request to `https://usage.sergeybaus.com`, which passes it to PostHog (US), the processor. PostHog receives the gateway's IP address, derives the country from it, and keeps the address with the event; it keeps no person profiles. What is collected, the public numbers, and how to have your events deleted with your install ID: https://usage.sergeybaus.com.
-- **On disk.** `$HERMES_HOME/data/telesec/telemetry.json` holds the install ID, the switch, the notice version, and the last day each event went.
+- **On disk.** `$HERMES_HOME/data/telesec/telemetry.json` holds the install ID, the switch, the notice version, and the last day each event went; `usage-notice-sent` next to it records that the gateway sent the notice.
 
 ```bash
-hermes telesec telemetry            # status: on or off, why, the install ID, and the notice while it is due
-hermes telesec telemetry off
+hermes telesec telemetry            # status: on or off, why, and the install ID
 hermes telesec telemetry on
+hermes telesec telemetry off
 hermes telesec telemetry status --format json
 ```
 
