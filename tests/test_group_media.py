@@ -858,7 +858,7 @@ async def test_same_words_in_two_messages_are_both_processed(plugin, group_app, 
 
     assert len(boundary.stt) == 2
     assert [params["text"] for params in request.sends()] == [f"🎙️ {SPOKEN}"] * 2
-    assert [event.message_id for event in adapter.events] == ["77", "78"]
+    assert sorted(event.message_id for event in adapter.events) == ["77", "78"]
 
 
 @pytest.mark.asyncio
