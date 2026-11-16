@@ -10,6 +10,8 @@ every outbound action.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import copy
 import hashlib
 import inspect
@@ -18,6 +20,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import subprocess
 import threading
 import time
@@ -82,6 +85,7 @@ from . import deletion_alerts as _deletion_alerts
 from . import dossier_panel as _dossier_panel
 from . import dossier_support as _dossier_support
 from . import global_settings as _global_settings
+from . import group_media as _group_media
 from . import history_support as _history_support
 from . import owner_panel as _owner_panel
 from . import settings_panel as _settings_panel
@@ -528,12 +532,28 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
         def check_update(self, update: Any) -> bool:
             return getattr(update, "business_connection", None) is not None
 
+    async def on_group_media(update: Any, context: Any) -> None:
+        # Claimed: core must never see it, even when the claim fails, or Hermes would transcribe and echo it.
+        try:
+            _claim_group_media(update, bot=context.bot, adapter=adapter)
+        except Exception as exc:  # noqa: BLE001 - the update stays claimed
+            logger.warning("%s: group media claim failed (%s)", _PLUGIN_NAME, type(exc).__name__)
+        raise ApplicationHandlerStop
+
+    class GroupMediaHandler(BaseHandler):
+        def check_update(self, update: Any) -> bool:
+            try:
+                return _group_media_message(update) is not None
+            except Exception:  # noqa: BLE001 - a malformed update is simply not ours
+                return False
+
     _deletion_alerts.bind(adapter._bot)
     app.add_handler(BusinessHandler(on_business_update, block=True), group=_RAW_HISTORY_HANDLER_GROUP)
     app.add_handler(OwnerPanelHandler(on_owner_panel_update, block=True), group=_RAW_HISTORY_HANDLER_GROUP)
     app.add_handler(
         BusinessConnectionHandler(on_business_connection_update, block=True), group=_RAW_HISTORY_HANDLER_GROUP
     )
+    app.add_handler(GroupMediaHandler(on_group_media, block=True), group=_RAW_HISTORY_HANDLER_GROUP)
     _dossier_support.ensure_worker_started()
     _usage_stats.started()
 
@@ -1021,15 +1041,17 @@ def _transcribable_payload(message: Any) -> tuple[Any, str, str] | None:
 
 
 def _cache_path_for(message: Any) -> Path:
-    business_connection_id = _safe_part(_business_connection_id(message))
-    chat_id = _safe_part(getattr(getattr(message, "chat", None), "id", "chat"))
-    message_id = _safe_part(getattr(message, "message_id", "message"))
     payload = _transcribable_payload(message)
     label = payload[1] if payload else "media"
     ext = payload[2] if payload else ".ogg"
     root = get_hermes_home() / "cache" / _PLUGIN_NAME
     root.mkdir(parents=True, exist_ok=True)
-    return root / f"business_{business_connection_id}_{label}_{time.time_ns()}_{chat_id}_{message_id}{ext}"
+    business_connection_id = _business_connection_id(message)
+    if not business_connection_id:  # Hermes STT logs the file name, so a group file name carries no IDs
+        return root / f"group_{label}_{secrets.token_hex(8)}{ext}"
+    chat_id = _safe_part(getattr(getattr(message, "chat", None), "id", "chat"))
+    message_id = _safe_part(getattr(message, "message_id", "message"))
+    return root / f"business_{_safe_part(business_connection_id)}_{label}_{time.time_ns()}_{chat_id}_{message_id}{ext}"
 
 
 async def _download_voice(message: Any, path: Path, *, max_bytes: int | None = None) -> Path:
@@ -1569,7 +1591,7 @@ async def _cleanup_transcript(
             )
             return transcript
         except Exception as exc:  # noqa: BLE001 - cleanup failure should not drop transcript
-            logger.warning("%s: injected cleanup failed: %s", _PLUGIN_NAME, exc)
+            logger.warning("%s: injected cleanup failed (%s)", _PLUGIN_NAME, type(exc).__name__)
             return transcript
 
     if llm is None:
@@ -1592,7 +1614,7 @@ async def _cleanup_transcript(
             purpose="telegram_business_voice_cleanup",
         )
     except Exception as exc:  # noqa: BLE001 - cleanup failure should not drop transcript
-        logger.warning("%s: LLM cleanup failed; posting raw transcript: %s", _PLUGIN_NAME, exc)
+        logger.warning("%s: LLM cleanup failed; posting raw transcript (%s)", _PLUGIN_NAME, type(exc).__name__)
         _usage_stats.error(f"cleanup.{type(exc).__name__}")
         return transcript
 
@@ -1633,9 +1655,9 @@ async def _cleanup_transcript(
         )
     except Exception as exc:  # noqa: BLE001 - cleanup failure should preserve the source
         logger.warning(
-            "%s: cleanup repair failed; posting raw transcript: %s",
+            "%s: cleanup repair failed; posting raw transcript (%s)",
             _PLUGIN_NAME,
-            exc,
+            type(exc).__name__,
         )
         _usage_stats.error(f"cleanup.{type(exc).__name__}")
         return transcript
@@ -1691,6 +1713,26 @@ def _expandable_entity_unsupported(exc: Exception) -> bool:
     )
 
 
+class TranscriptDeliveryError(Exception):
+    """A group transcript part was not delivered: ``sent`` holds what Telegram acknowledged before it, and
+    ``uncertain`` is True when the failed part may still have arrived (a timeout, a network error)."""
+
+    def __init__(self, sent: list[Any], *, uncertain: bool) -> None:
+        super().__init__(f"transcript delivery stopped after {len(sent)} part(s)")
+        self.sent = sent
+        self.uncertain = uncertain
+
+
+async def _send_with_entity_fallback(bot: Any, kwargs: dict[str, Any], *, collapsible: bool) -> Any:
+    try:
+        return await bot.send_message(**kwargs)
+    except Exception as exc:
+        if not collapsible or not _expandable_entity_unsupported(exc):
+            raise
+        logger.info("%s: expandable transcript unavailable; using plain text: %s", _PLUGIN_NAME, exc)
+        return await bot.send_message(**{key: value for key, value in kwargs.items() if key != "entities"})
+
+
 async def _send_transcript_messages(
     *,
     bot: Any,
@@ -1699,14 +1741,25 @@ async def _send_transcript_messages(
     texts: Iterable[str],
     collapsible: bool = True,
     save: bool = False,
+    group: bool = False,
+    reply: bool = True,
 ) -> list[Any]:
-    """Send the transcript as a reply to ``message``, saving each sent part when ``save``; returns what each
-    send returned."""
+    """Send the transcript, its first part replying to ``message`` when ``reply``, saving each sent part when
+    ``save``; returns what each send returned.
+
+    A Business chat sends through the message's connection and raises without one: a Business transcript never
+    falls back to an ordinary bot message. ``group`` sends ordinary bot messages into the message's forum topic
+    and raises TranscriptDeliveryError, with the parts already sent, when a part fails.
+    """
     chat_id = getattr(getattr(message, "chat", None), "id", None)
-    business_connection_id = _business_connection_id(message)
-    reply_to_message_id = getattr(message, "message_id", None)
-    if chat_id is None or not business_connection_id:
-        raise ValueError("missing chat_id or business_connection_id")
+    if group:
+        target: dict[str, Any] = _group_media.send_thread_kwargs(message)
+    else:
+        business_connection_id = _business_connection_id(message)
+        if chat_id is None or not business_connection_id:
+            raise ValueError("missing chat_id or business_connection_id")
+        target = {"business_connection_id": business_connection_id}
+    reply_to_message_id = getattr(message, "message_id", None) if reply else None
 
     first = True
     sent: list[Any] = []
@@ -1715,7 +1768,7 @@ async def _send_transcript_messages(
         kwargs = {
             "chat_id": chat_id,
             "text": text,
-            "business_connection_id": business_connection_id,
+            **target,
             **notify_kwargs,
         }
         if collapsible:
@@ -1723,13 +1776,11 @@ async def _send_transcript_messages(
         if first and reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
         try:
-            sent.append(await bot.send_message(**kwargs))
+            sent.append(await _send_with_entity_fallback(bot, kwargs, collapsible=collapsible))
         except Exception as exc:
-            if not collapsible or not _expandable_entity_unsupported(exc):
+            if not group:
                 raise
-            logger.info("%s: expandable transcript unavailable; using plain text: %s", _PLUGIN_NAME, exc)
-            fallback_kwargs = {key: value for key, value in kwargs.items() if key != "entities"}
-            sent.append(await bot.send_message(**fallback_kwargs))
+            raise TranscriptDeliveryError(sent, uncertain=not _definite_caption_edit_rejection(exc)) from exc
         if save:
             await _save_transcript(bot, message, sent[-1], text, reply_to=message if first else None)
         first = False
@@ -1774,6 +1825,20 @@ def _resolve_transcriber(
     from tools.transcription_tools import transcribe_audio
 
     return transcribe_audio
+
+
+async def _in_worker_thread(fn: Callable[..., Any], /, *args: Any) -> Any:
+    """``asyncio.to_thread``, but a cancelled caller first waits for the thread: the caller's cleanup then never
+    removes a file that a surviving ffmpeg or STT thread still reads. The work is an executor future, not a task,
+    so the cancellation of every task at shutdown (``asyncio.run``) does not mark it done early either."""
+    work = asyncio.get_running_loop().run_in_executor(None, contextvars.copy_context().run, fn, *args)
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        while not work.done():  # a repeated cancel must not cut the wait short either
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({work})
+        raise
 
 
 # A raw transcript waiting for its cleanup, by (connection, chat, message id) of the caption or reply that
@@ -1821,11 +1886,15 @@ def _timing_fields(timings: dict[str, Any]) -> str:
 
 
 async def _edit_transcript_in_place(*, bot: Any, message: Any, surface: str, target_id: Any, cleaned: str) -> str:
-    """Replace the raw transcript with the cleaned one in the same caption or reply; returns the outcome."""
+    """Replace the raw transcript with the cleaned one in the same caption or reply; returns the outcome.
+
+    A group transcript is an ordinary bot message, so its edit has no ``business_connection_id``.
+    """
+    business_connection_id = _business_connection_id(message)
     common = {
         "chat_id": _get(_get(message, "chat"), "id"),
         "message_id": target_id,
-        "business_connection_id": _business_connection_id(message),
+        **({"business_connection_id": business_connection_id} if business_connection_id else {}),
     }
     if surface == "caption":
         caption, entities = _build_transcript_caption_payload(message, cleaned) or ("", ())
@@ -1981,6 +2050,82 @@ async def _publish_transcript(
         _PENDING_TRANSCRIPTS.pop(key, None)
 
 
+async def _transcribe_audio_file(
+    message: Any, transcribe_fn: Callable[[str], dict[str, Any]] | None
+) -> str | None:
+    """Gate a candidate attached audio file with its limits and a speech-prefix probe, then transcribe it.
+
+    Returns None when a gate rejects it or STT fails. Its transient files are gone when this returns or raises,
+    and never while a worker thread still reads them.
+    """
+    media, media_label = cast(tuple[Any, str], _audio_file_payload(message))
+    if _audio_file_has_music_tags(media):
+        logger.info("%s: rejected %s with explicit title/performer music tags", _PLUGIN_NAME, media_label)
+        return None
+    max_duration, max_bytes, probe_seconds, min_words = _audio_file_limits()
+    file_size = _get(media, "file_size")
+    try:
+        file_size = int(file_size)
+    except (TypeError, ValueError):
+        file_size = 0
+    if file_size <= 0 or file_size > max_bytes:
+        logger.info("%s: rejected %s due to unsafe file-size metadata", _PLUGIN_NAME, media_label)
+        return None
+
+    duration_metadata = _get(media, "duration")
+    try:
+        duration = float(duration_metadata)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if not math.isfinite(duration) or duration < 0:
+        duration = 0.0
+    if duration > max_duration:
+        logger.info("%s: rejected %s due to duration metadata", _PLUGIN_NAME, media_label)
+        return None
+
+    path = _cache_path_for(message)
+    probe_path = path.with_name(f"{path.stem}.probe.wav")
+    normalized_path = path.with_name(f"{path.stem}.full.wav")
+    try:
+        await _download_voice(message, path, max_bytes=max_bytes)
+        if path.stat().st_size <= 0 or path.stat().st_size > max_bytes:
+            return None
+        duration = await _in_worker_thread(_local_audio_duration, path)
+        if duration is None or duration > max_duration:
+            return None
+
+        extracted = await _in_worker_thread(_extract_audio_probe, path, probe_path, probe_seconds)
+        if not extracted:
+            return None
+        transcriber = _resolve_transcriber(transcribe_fn)
+        probe_result = await _in_worker_thread(transcriber, str(probe_path))
+        if not isinstance(probe_result, dict) or not probe_result.get("success"):
+            return None
+        probe_transcript = str(probe_result.get("transcript") or "").strip()
+        if not _audio_probe_has_meaningful_speech(probe_transcript, min_words):
+            return None
+
+        if duration <= probe_seconds:
+            return probe_transcript
+        full_stt_path = path
+        if path.suffix.casefold() not in _DIRECT_STT_AUDIO_EXTENSIONS:
+            normalized = await _in_worker_thread(_normalize_audio_for_stt, path, normalized_path)
+            if not normalized:
+                return None
+            full_stt_path = normalized_path
+        full_result = await _in_worker_thread(transcriber, str(full_stt_path))
+        if not isinstance(full_result, dict) or not full_result.get("success"):
+            _usage_stats.error("stt.failed")
+            return None
+        return str(full_result.get("transcript") or "").strip() or None
+    finally:
+        for transient_path in (probe_path, normalized_path, path):
+            try:
+                transient_path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("%s: failed to remove transient media (%s)", _PLUGIN_NAME, type(exc).__name__)
+
+
 async def _process_business_audio_file(
     *,
     message: Any,
@@ -1994,70 +2139,12 @@ async def _process_business_audio_file(
     payload = _audio_file_payload(message)
     if payload is None:
         return
-    media, media_label = payload
-    if _audio_file_has_music_tags(media):
-        logger.info("%s: rejected business %s with explicit title/performer music tags", _PLUGIN_NAME, media_label)
-        return
-    max_duration, max_bytes, probe_seconds, min_words = _audio_file_limits()
-    file_size = _get(media, "file_size")
-    try:
-        file_size = int(file_size)
-    except (TypeError, ValueError):
-        file_size = 0
-    if file_size <= 0 or file_size > max_bytes:
-        logger.info("%s: rejected business %s due to unsafe file-size metadata", _PLUGIN_NAME, media_label)
-        return
-
-    duration_metadata = _get(media, "duration")
-    try:
-        duration = float(duration_metadata)
-    except (TypeError, ValueError):
-        duration = 0.0
-    if not math.isfinite(duration) or duration < 0:
-        duration = 0.0
-    if duration > max_duration:
-        logger.info("%s: rejected business %s due to duration metadata", _PLUGIN_NAME, media_label)
-        return
-
+    media_label = payload[1]
     timings: dict[str, Any] = {"start": time.monotonic()}
-    path = _cache_path_for(message)
-    probe_path = path.with_name(f"{path.stem}.probe.wav")
-    normalized_path = path.with_name(f"{path.stem}.full.wav")
     try:
-        await _download_voice(message, path, max_bytes=max_bytes)
-        if path.stat().st_size <= 0 or path.stat().st_size > max_bytes:
+        transcript = await _transcribe_audio_file(message, transcribe_fn)
+        if transcript is None:
             return
-        duration = await asyncio.to_thread(_local_audio_duration, path)
-        if duration is None or duration > max_duration:
-            return
-
-        extracted = await asyncio.to_thread(_extract_audio_probe, path, probe_path, probe_seconds)
-        if not extracted:
-            return
-        transcriber = _resolve_transcriber(transcribe_fn)
-        probe_result = await asyncio.to_thread(transcriber, str(probe_path))
-        if not isinstance(probe_result, dict) or not probe_result.get("success"):
-            return
-        probe_transcript = str(probe_result.get("transcript") or "").strip()
-        if not _audio_probe_has_meaningful_speech(probe_transcript, min_words):
-            return
-
-        if duration <= probe_seconds:
-            transcript = probe_transcript
-        else:
-            full_stt_path = path
-            if path.suffix.casefold() not in _DIRECT_STT_AUDIO_EXTENSIONS:
-                normalized = await asyncio.to_thread(_normalize_audio_for_stt, path, normalized_path)
-                if not normalized:
-                    return
-                full_stt_path = normalized_path
-            full_result = await asyncio.to_thread(transcriber, str(full_stt_path))
-            if not isinstance(full_result, dict) or not full_result.get("success"):
-                _usage_stats.error("stt.failed")
-                return
-            transcript = str(full_result.get("transcript") or "").strip()
-            if not transcript:
-                return
         _timing_mark(timings, "stt")
 
         final_text, caption_outcome = await _publish_transcript(
@@ -2086,12 +2173,6 @@ async def _process_business_audio_file(
     except Exception as exc:
         logger.warning("%s: business attached-audio handling failed: %s", _PLUGIN_NAME, exc, exc_info=True)
         _usage_stats.error(f"audio.{type(exc).__name__}")
-    finally:
-        for transient_path in (probe_path, normalized_path, path):
-            try:
-                transient_path.unlink(missing_ok=True)
-            except OSError as exc:
-                logger.warning("%s: failed to remove transient media: %s", _PLUGIN_NAME, exc)
 
 
 async def _process_business_voice_event(
@@ -2263,6 +2344,197 @@ def _log_policy_decision(message: Any, decision: _transcription_modes.PolicyDeci
         "transcribe" if decision.transcribe else "skip",
         decision.reason,
     )
+
+
+# --- Group media ------------------------------------------------------------------------------
+# A listed group's recordings: every human member's voice note, video note or audio gets a transcript, and a
+# recording addressed to this bot (or any recording where Hermes answers every text) is then handed to Hermes as
+# that member's voice message. Failures are silent in the group: content-free log lines only.
+
+# Downloads and STT for at most two group recordings at once; publishing and handoff wait for none.
+_GROUP_TRANSCRIPTIONS = asyncio.Semaphore(_group_media.MAX_TRANSCRIPTIONS)
+
+
+def _group_media_message(update: Any) -> Any | None:
+    """The update's recording when Telesec claims it; anything else stays with Hermes as before."""
+    message = getattr(update, "message", None)
+    if message is None or message.chat.type not in ("group", "supergroup"):
+        return None
+    if message.chat.id not in _group_media.configured_chats(_history_support.get_config):
+        return None
+    if message.migrate_to_chat_id is not None:
+        logger.warning("%s: a listed group became a supergroup with a new chat ID; update %s", _PLUGIN_NAME,
+                       _group_media.CONFIG_KEY)
+        return None
+    if _transcribable_payload(message) is None or _group_media.human_sender(message) is None or _disabled():
+        return None
+    return message
+
+
+def _claim_group_media(update: Any, *, bot: Any, adapter: Any) -> None:
+    message = update.message
+    if not _mark_identity_seen(_group_media.identity(bot.id, message)):
+        logger.info("%s: duplicate group recording skipped", _PLUGIN_NAME)
+        return
+    request = _group_media.is_request(message, adapter=adapter, bot_id=bot.id, username=bot.username)
+    llm = _llm_facade
+    _schedule_module_work(
+        lambda: _process_group_media(update=update, adapter=adapter, bot=bot, request=request, llm=llm)
+    )
+
+
+async def _transcribe_group_media(message: Any) -> str | None:
+    """The raw transcript of one group recording; None when it is too big, has no speech, or STT fails."""
+    media, label, _ = cast(tuple[Any, str, str], _transcribable_payload(message))
+    if label in {"audio", "audio_document"}:
+        return await _transcribe_audio_file(message, None)
+    if (_get(media, "file_size") or 0) > _group_media.VOICE_MAX_BYTES:
+        logger.info("%s: group %s is over the size limit; not downloaded", _PLUGIN_NAME, label)
+        return None
+    path = _cache_path_for(message)
+    try:
+        await _download_voice(message, path, max_bytes=_group_media.VOICE_MAX_BYTES)
+        result = await _in_worker_thread(_resolve_transcriber(None), str(path))
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("%s: failed to remove transient media (%s)", _PLUGIN_NAME, type(exc).__name__)
+    if not isinstance(result, dict) or not result.get("success"):
+        if not (isinstance(result, dict) and result.get("no_speech")):
+            logger.info("%s: group %s transcription failed", _PLUGIN_NAME, label)
+            _usage_stats.error("stt.failed")
+        return None
+    return str(result.get("transcript") or "").strip() or None
+
+
+def _group_request_event(*, update: Any, adapter: Any, bot: Any, transcript: str) -> Any:
+    """The recording as Hermes's own voice message from that member: the raw transcript in quotes, then the typed
+    caption as its own paragraph; no media, so Hermes runs no STT and posts no echo; the answer replies to the
+    recording; spoken slash commands stay text. ``metadata`` stays empty: Hermes's admission refuses any."""
+    from gateway.platforms.base import resolve_channel_prompt
+    from gateway.platforms.event import MessageEvent, MessageType
+
+    message = update.message
+    chat_id = str(message.chat.id)
+    thread_id = _group_media.thread_id(message)
+    user = message.from_user
+    chat_topic, topic_skill = _group_media.topic_binding(adapter, message, thread_id)
+    source = adapter.build_source(
+        chat_id=chat_id, chat_name=message.chat.title, chat_type="group", user_id=str(user.id),
+        user_name=user.full_name, thread_id=thread_id, chat_topic=chat_topic, message_id=str(message.message_id),
+        is_bot=False,
+    )
+    caption = _group_media.caption_text(message, bot.id, bot.username)
+    reply_to_message_id, reply_to_text = _group_media.reply_context(message)
+    configured = resolve_channel_prompt(adapter.config.extra, thread_id or chat_id, chat_id if thread_id else None)
+    return MessageEvent(
+        text=f'"{transcript}"' + (f"\n\n{caption}" if caption else ""),
+        message_type=MessageType.VOICE,
+        source=source,
+        message_id=str(message.message_id),
+        platform_update_id=update.update_id,
+        reply_to_message_id=reply_to_message_id,
+        reply_to_text=reply_to_text,
+        reply_anchor_override=str(message.message_id),
+        auto_skill=topic_skill,
+        channel_prompt=_group_media.channel_prompt(configured, bot.username),
+        allow_gateway_control=False,
+        reply_expected=_group_media.reply_expected(message, bot.id, bot.username),
+        timestamp=message.date,
+    )
+
+
+async def _hand_off_group_request(*, update: Any, adapter: Any, bot: Any, transcript: str, key: str) -> str:
+    """Submit a request to Hermes once. Hermes reports neither admission nor refusal, so "submitted" means
+    ``handle_message`` returned; a failure is logged and never retried."""
+    await asyncio.to_thread(_group_media.set_stage, key, "handoff_submitted")
+    try:
+        await adapter.handle_message(_group_request_event(update=update, adapter=adapter, bot=bot,
+                                                          transcript=transcript))
+    except Exception as exc:  # noqa: BLE001 - the transcript stays; the request is not repeated
+        logger.warning("%s: group request handoff failed (%s); not retried", _PLUGIN_NAME, type(exc).__name__)
+        _usage_stats.error(f"handoff.{type(exc).__name__}")
+        await asyncio.to_thread(_group_media.set_stage, key, "handoff_failed")
+        return "failed"
+    await asyncio.to_thread(_group_media.set_stage, key, "done")
+    _usage_stats.feature("group request")
+    return "submitted"
+
+
+async def _clean_group_transcript(*, bot: Any, message: Any, target: Any, raw: str, llm: Any) -> bool:
+    """Edit a one-part group transcript in place when cleanup changes it; a request already has the raw text."""
+    cleaned = (await _cleanup_transcript(raw, llm=llm)).strip()
+    parts = _format_transcript_messages(cleaned)
+    if cleaned == raw or len(parts) != 1:
+        return False
+    target_id = _get(target, "message_id")
+    key = _transcript_target_key(message, target_id)
+    # Only this bot edits its own transcript; the set lets the shared edit proceed.
+    _PENDING_TRANSCRIPTS[key] = {parts[0]}
+    try:
+        outcome = await _edit_transcript_in_place(
+            bot=bot, message=message, surface="reply", target_id=target_id, cleaned=cleaned
+        )
+    finally:
+        _PENDING_TRANSCRIPTS.pop(key, None)
+        _history_support._TRANSCRIPT_CLEANUPS.pop(key, None)
+    if outcome == "edited":
+        _usage_stats.feature("transcript cleanup")
+    return outcome == "edited"
+
+
+async def _process_group_media(*, update: Any, adapter: Any, bot: Any, request: bool, llm: Any) -> None:
+    """Transcribe one claimed group recording, publish the raw transcript, hand a request to Hermes, then clean.
+
+    A passive transcript replies to the recording; a request's transcript is a standalone message in its topic
+    and Hermes's answer replies to the recording. The request waits for every transcript part; a failed, partial
+    or uncertain delivery withholds it. Each source passes once, also across a restart (the state file).
+    """
+    message = update.message
+    label = cast(tuple[Any, str, str], _transcribable_payload(message))[1]
+    key = ":".join(_group_media.identity(bot.id, message))
+    try:
+        if not await asyncio.to_thread(_group_media.begin, key):
+            logger.info("%s: group %s already handled; not processed again", _PLUGIN_NAME, label)
+            return
+        try:
+            async with _GROUP_TRANSCRIPTIONS:
+                transcript = await _transcribe_group_media(message)
+        except Exception as exc:  # noqa: BLE001 - no transcript, no request
+            logger.warning("%s: group %s transcription failed (%s)", _PLUGIN_NAME, label, type(exc).__name__)
+            _usage_stats.error(f"group.{type(exc).__name__}")
+            transcript = None
+        if transcript is None:
+            await asyncio.to_thread(_group_media.set_stage, key, "done")
+            return
+        try:
+            sent = await _send_transcript_messages(
+                bot=bot, adapter=adapter, message=message, texts=_format_transcript_messages(transcript),
+                group=True, reply=not request,
+            )
+        except TranscriptDeliveryError as exc:
+            logger.warning("%s: group transcript stopped after %d part(s) (%s, uncertain=%s); no request sent",
+                           _PLUGIN_NAME, len(exc.sent), type(exc.__cause__).__name__, exc.uncertain)
+            _usage_stats.error(f"group.{type(exc.__cause__).__name__}")
+            await asyncio.to_thread(_group_media.set_stage, key, "withheld")
+            return
+        await asyncio.to_thread(_group_media.set_stage, key, "published")
+        _usage_stats.feature("group transcript")
+        handoff = "-"
+        if request:
+            handoff = await _hand_off_group_request(update=update, adapter=adapter, bot=bot, transcript=transcript,
+                                                    key=key)
+        cleaned = len(sent) == 1 and await _clean_group_transcript(
+            bot=bot, message=message, target=sent[0], raw=transcript, llm=llm
+        )
+        if not request:
+            await asyncio.to_thread(_group_media.set_stage, key, "done")
+        logger.info("%s: group %s transcribed parts=%d cleaned=%s request=%s", _PLUGIN_NAME, label, len(sent),
+                    cleaned, handoff)
+    except Exception as exc:  # noqa: BLE001 - silent in the group
+        logger.warning("%s: group %s handling failed (%s)", _PLUGIN_NAME, label, type(exc).__name__)
+        _usage_stats.error(f"group.{type(exc).__name__}")
 
 
 # --- Owner panel ("Manage Bot") ---------------------------------------------------------------

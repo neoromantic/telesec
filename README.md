@@ -4,7 +4,7 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Usage stats](https://img.shields.io/badge/usage-stats-595b54)](https://www.sergeybaus.com/usage/telesec)
 
-**Telesec — Telegram Business secretary for [Hermes](https://github.com/NousResearch/hermes-agent).** Voice messages, round video notes, and conservatively recognized attached audio files become readable text without a full agent turn. Optional correspondence history preserves text, edits, and deletions for contact-based search.
+**Telesec — Telegram Business secretary for [Hermes](https://github.com/NousResearch/hermes-agent).** Voice messages, round video notes, and conservatively recognized attached audio files become readable text without a full agent turn. Optional correspondence history preserves text, edits, and deletions for contact-based search. In Telegram groups you list, Telesec also transcribes members' recordings and passes spoken requests to the assistant; [group transcription](#group-transcription) needs no Business account.
 
 [Product demonstration and setup](https://telesec.sergeybaus.com). Telesec is a community plugin and is not affiliated with Nous Research.
 
@@ -25,6 +25,49 @@
 9. With [history](#correspondence-history) on, saves the transcript Telegram accepted, and its cleanup, to the chat's history. Telegram sends the bot no copy of its own messages, so Telesec saves them itself. Stats do not count a transcript as a message you typed, and dossiers read it as a voice transcript ([voice transcripts](docs/HISTORY.md#voice-transcripts)).
 
 Handled updates are identified from stable Telegram Business connection, chat, update/message, and relationship data, then suppressed in memory for 24 hours. A successful caption edit suppresses the separate transcript reply, so the chat never receives both forms. PTB `BadRequest` is treated as a definite Telegram-side rejection unless it is the recognized `message is not modified` or unsupported-entity case. Failed entity requests are not treated as delivered before their targeted plain-text retry, and ambiguous post-send transport/backend failures suppress the reply fallback unless remote state is verified. The voice pipeline never runs a separate model provider client and never needs its own credentials.
+
+## Group transcription
+
+In a Telegram group or supergroup you list, Telesec transcribes members' voice notes, round videos (circles), and audio files. A recording addressed to the bot becomes a spoken request: Hermes handles it like the member's own voice message. This needs no Telegram Business account. It is off until you list a group.
+
+```yaml
+plugins:
+  entries:
+    telesec:
+      settings:
+        group_chats:
+          - "-1001234567890"
+```
+
+Put the list in the Hermes `config.yaml` and restart the gateway. Each entry is a group chat ID, a string or a number. A listed group covers all its forum topics. An empty or missing list turns the feature off. If any entry is not a group chat ID (a negative number), the whole feature is off and the gateway logs one warning. When a group becomes a supergroup, Telegram gives it a new chat ID: Telesec logs a warning, and you need to put the new ID in the list.
+
+The bot must see every message in the group: turn Telegram privacy mode off for it (BotFather → `/setprivacy` → Disable), or make it a group admin.
+
+| Recording | Transcript | Assistant |
+|---|---|---|
+| Not a request | One transcript that replies to the recording. | Nothing. It never becomes a task and the assistant does not see it. |
+| A request | One transcript in the same topic, as its own message. | Hermes handles the request as the member's voice message and replies to the recording. It gets the raw transcript and is told not to repeat it. |
+| From a bot, this bot, an anonymous admin, a channel, or an automatic forward | Telesec does nothing. | Hermes handles it as before. |
+
+Which recordings are requests follows the bot's Hermes text settings:
+
+- **Hermes answers every text message here.** This is Hermes's default (`telegram.require_mention` unset or `false`), and also a chat in `telegram.free_response_chats` or a topic in `telegram.free_response_topics`. Then every recording is a request, forwarded ones too, except one whose caption names another bot and not this one. A recording that replies to another member's message may stay unanswered, as such a text may. For passive transcripts of ordinary talk, require mentions.
+- **Mentions required** (`telegram.require_mention: true`). Then only an addressed recording is a request: a reply to a message from this bot (a Telesec transcript counts) whose caption names no other bot, or a caption with `@yourbot` or `/command@yourbot`. A forwarded recording, a reply to a forum topic's first message, and mentions of others are not addresses.
+
+Words spoken inside a recording never count, even the bot's name. Telegram apps do not let you add a caption to a voice note or a circle, so a member asks the bot by replying to one of its messages with the recording. An audio file can also carry a caption with `@yourbot`; the request then gets the caption as typed text after the transcript.
+
+Hermes still checks the member's rights when it gets a request, as for their text. A refused request gets no answer, and the transcript stays. Its other group rules do not apply to recordings: `allowed_chats`, `allowed_topics`, `ignored_threads`, wake words (`mention_patterns`), and `guest_mode`. List only groups where the bot should work.
+
+Limits and behavior:
+
+- Voice notes and circles up to 20 MiB, with no duration limit; larger ones are not downloaded. Audio files keep the [attached-audio limits](#configuration) (300 seconds and 20 MiB by default) and the speech check. At most two group recordings are transcribed at once; a long assistant turn does not hold up other transcripts.
+- One speech-to-text run per recording, through Hermes's configured STT. Cleanup follows the same switches as in Business chats and edits the posted transcript in place; a transcript longer than one message is not cleaned. The request always uses the raw text.
+- A request goes to Hermes only after Telegram accepted every transcript part. If a part fails, or Telesec cannot tell whether it arrived, the request is not sent.
+- Failures are silent in the group: no error notices, also with `TELESEC_SEND_ERRORS`. The gateway log gets a line without text, names, or IDs.
+- Each recording is handled once. Telesec does not process an edited recording again. `$HERMES_HOME/data/telesec/group-media.json` keeps the bot, chat, and message IDs and the stage of each recording for 24 hours, never text. After a restart, unfinished recordings are marked interrupted and not processed again, so a request cut off by a restart is lost.
+- Group messages never reach history, stats, dossiers, or deletion alerts. Per-chat transcription modes are for Business chats only; the transcription switch in [Settings](#settings) covers groups too.
+
+Hermes has no public API to hand a message to the assistant or to read its trigger settings. Telesec builds a Hermes `MessageEvent` and calls the Telegram adapter's `handle_message`, although the Hermes plugin docs describe the adapter as read-only for plugins. It reads `require_mention` and the free-response lists through the adapter's own getters (`_telegram_require_mention`, `_telegram_free_response_chats`, `_telegram_is_free_response_topic`); if they are missing or fail, Telesec assumes mentions are required. A Hermes update can break this. Group transcription is built against Hermes 0.22.6 and tested offline; its live checks are recorded in [VERIFY](docs/VERIFY.md). Business features were run live on 0.21.6 and 0.22.6. For 0.23.1, the top of the allowed range, Telesec was only checked against the Hermes source.
 
 ## Settings
 
@@ -313,9 +356,9 @@ See the [roadmap](docs/ROADMAP.md) and [assistant design](docs/ASSISTANT.md).
 
 ## Requirements
 
-- Hermes Agent 0.21.6 or newer with `ctx.register_telegram_handler`, CLI/skill registration, `pre_gateway_dispatch`, `ctx.llm`, and plugin model tasks (`ctx.register_auxiliary_task`, used by dossiers). Catalog validation targets Hermes 0.22.2 and PTB 22.8. [Compatibility evidence](docs/VERIFY.md).
+- Hermes Agent 0.21.6 through 0.23.1 (`requires_hermes: ">=0.21.6,<=0.23.1"`; Hermes does not load Telesec outside this range). The newest version run live is 0.22.6; 0.23.1 was checked against its source only ([record](docs/VERIFY.md#hermes-0231-source-check-2026-11-16)). Hermes must provide `ctx.register_telegram_handler`, CLI/skill registration, `pre_gateway_dispatch`, `ctx.llm`, and plugin model tasks (`ctx.register_auxiliary_task`, used by dossiers). Catalog validation targets Hermes 0.22.2 and PTB 22.8. Group transcription is built against Hermes 0.22.6. [Compatibility evidence](docs/VERIFY.md).
 - Python 3.11 or newer.
-- A configured Telegram gateway with a Telegram Business connection.
+- A configured Telegram gateway. The Business features need a Telegram Business connection; [group transcription](#group-transcription) does not.
 - A working Hermes STT provider. Configure it with `hermes setup` or the [`stt` settings](https://hermes-agent.nousresearch.com/docs/user-guide/configuration).
 - `ffprobe` and `ffmpeg` on `PATH` for attached-audio duration verification, prefix extraction, and normalization. Voice messages and video notes do not use these gates.
 
@@ -375,7 +418,7 @@ Removing the plugin leaves its data under `$HERMES_HOME/data/telesec/`: history,
 
 ## Configuration
 
-All plugin variables are optional. Hermes Desktop's plugin settings form exposes `cleanup_style` and `agent_enable`. They are read through `ctx.get_config` under `plugins.entries.telesec.settings`; environment variables override the form. Settings are re-read when used. Restart the gateway after changing environment variables or these settings. Transcription, history, dossiers, and history retention have no variable or Desktop setting: they are set in [Settings](#settings) (`/telesec` or `hermes telesec settings set`), with no restart. On upgrade, an old `TELESEC_DISABLE`, `TELESEC_HISTORY_ENABLE`, Desktop `history_enable`, `TELESEC_DOSSIER_ENABLE`, Desktop `dossier_enable`, or `TELESEC_HISTORY_RETENTION_DAYS` value is moved into Settings once and then ignored.
+All plugin variables are optional. Hermes Desktop's plugin settings form exposes `cleanup_style` and `agent_enable`; `group_chats` turns on [group transcription](#group-transcription) and has no variable. They are read through `ctx.get_config` under `plugins.entries.telesec.settings`; environment variables override the form. Settings are re-read when used. Restart the gateway after changing environment variables or these settings. Transcription, history, dossiers, and history retention have no variable or Desktop setting: they are set in [Settings](#settings) (`/telesec` or `hermes telesec settings set`), with no restart. On upgrade, an old `TELESEC_DISABLE`, `TELESEC_HISTORY_ENABLE`, Desktop `history_enable`, `TELESEC_DOSSIER_ENABLE`, Desktop `dossier_enable`, or `TELESEC_HISTORY_RETENTION_DAYS` value is moved into Settings once and then ignored.
 
 ```yaml
 plugins:
@@ -496,19 +539,21 @@ Contact dossiers use the same facade but their own [model task](#dossier-model),
 
 The plugin registers native Telegram handlers, a `pre_gateway_dispatch` hook, the `telesec` CLI, and the `history` and `dossiers` skills. Business text observations are persisted before normal dispatch; supported media is consumed directly before Hermes downloads it. The voice pipeline normalizes Telegram Business updates before its module sees them. The immutable event includes stable identity, Business connection, chat/user/message/update identifiers, known direction, message/edit timestamps, reply/edit/delete relationships, and provider-neutral media metadata. Direction remains `unknown` when Telegram supplies no outgoing marker; the voice module retains its existing asynchronous Business-owner lookup before editing a caption.
 
-All three native PTB handlers use group `-100`, before Hermes's ordinary Telegram handlers. PTB runs only the first matching handler in a group:
+All four native PTB handlers use group `-100`, before Hermes's ordinary Telegram handlers. PTB runs only the first matching handler in a group:
 
 | Handler | Scope and propagation |
 |---|---|
 | `BusinessHandler` | Business messages, edits, and deletions. Captures history and routes transcription, then raises `ApplicationHandlerStop` unless unhandled agent routing is explicitly enabled. The owner's `/stats` and `/dossier` commands, the `/stats` card, and handled media always stop. |
 | `OwnerPanelHandler` | Manage Bot `/start bizChat…`, an exact `/telesec` in a private chat, and callback data starting with `tb:` only. Claimed panel actions raise `ApplicationHandlerStop`. |
 | `BusinessConnectionHandler` | Business connection updates only; records in-memory connection knowledge and lets core continue. |
+| `GroupMediaHandler` | A human member's voice note, round video, or audio in a group listed in `group_chats` (`message` updates only). Schedules the [group transcription](#group-transcription) and always raises `ApplicationHandlerStop`, so Hermes runs no STT of its own. |
 
 There is no `CallbackQueryHandler` registration. The custom panel handler checks the `tb:` prefix before matching, so it leaves core and other plugins' button callbacks alone. Any future `CallbackQueryHandler` must declare `pattern=r"^tb:"` and use the same scoped payload parser.
 
 Source files:
 
 - `__init__.py`: registration, the Telegram handlers and dispatch hook, and the voice pipeline.
+- `group_media.py`: group transcription helpers: the `group_chats` list, senders, addressing, forum topics, the request prompt, and the `group-media.json` state.
 - `history_support.py`: history capture and storage, the contact catalog, and the `history` CLI.
 - `dossier_support.py`: the opt-in dossier worker, its settings and model route, the refresh of contacts and the persona, and forget.
 - `dossier_doc.py`: the dossier file (`document.json`): the document, its previous version, the owner note, and counters.
@@ -569,6 +614,7 @@ Incoming messages, transcripts that do not fit in one caption, messages outside 
 - History is off until turned on in Settings. Once enabled, retained text includes earlier edits and deleted messages. Telegram deletion is not erasure of the local archive; [retention and removal](docs/HISTORY.md#retention-and-removal) are separate controls. **Erase saved history** in a chat's panel or `history forget` deletes one chat's history and its dossier.
 - Deletion alerts go only to the owner's private chat with the bot and hold no message text; the deleted text shows only after a tap on **Show text**, read from local history.
 - Contact dossiers are off until turned on in Settings, and pause while history is off. History or the dossier off in a chat's panel, or the old server scope rule, pauses that chat's dossier and keeps its messages out of the persona. Once enabled, private chat text from the backfill window and later messages goes to the [dossier model](#dossier-model), and, when they are on, to the message check and fact extraction; groups are never processed. Telesec posts a dossier into a chat only on the owner's `/dossier`, and never adds the owner note or the persona to it; a fact the model took from the note into the dossier is part of it. The post goes out only once the dossier has seen every deletion and edit Telesec recorded in the backfill window; older ones and those Telesec never saw are unknown, the dossier keeps what it learned from messages retention pruned, and the model that drops deleted facts can miss one. Dossiers keep a short document and its previous version, not a second archive; the owner note can reach the dossier model and, through the document, the message check. Their logs carry counts, codes, and error types only. `dossier forget` deletes a dossier and its owner note without touching history, and forgetting or erasing a chat that the persona or its previous version read resets the persona at once ([storage and privacy](docs/DOSSIERS.md#storage-and-privacy)).
+- [Group transcription](#group-transcription) is off until you list a group. In a listed group the bot downloads members' recordings, sends transcripts as ordinary bot messages, and edits them after cleanup. The recording goes to the configured STT backend, and the transcript to cleanup when it is on. A request's raw transcript and caption go to the Hermes assistant like the member's own voice message. `group-media.json` keeps only IDs and stages for 24 hours.
 - Existing Hermes/Telegram media caches are outside this plugin's ownership and are never scanned or deleted.
 
 ## Usage stats
@@ -578,7 +624,7 @@ Telesec can send usage stats to its author, so he can see how many installs run,
 > Telesec can share usage stats with its author: how often it runs, which features are used, error codes, version and OS, tied to a random install ID. Never message text, transcripts, names, or chat IDs. Usage stats are off: nothing is sent unless you turn them on with the button below, in Settings, or with `hermes telesec telemetry on`. Details: https://usage.sergeybaus.com
 
 - **Turn them on.** Only the owner turns them on, with one of: **Enable usage stats** under the notice, **Share usage stats** in Settings (`/telesec`), or `hermes telesec telemetry on`. Getting or reading the notice, in Telegram or in a terminal, turns nothing on, and neither does `TELESEC_TELEMETRY=1`, even on an install updated from 0.17. An install updated from 0.17, which sent usage stats by default once the owner had seen its notice, stops sending; one where the owner turned them on keeps them on.
-- **What is sent.** `app_installed` once, `app_started` when the gateway starts, `feature_used` with a name from a fixed list in [`usage_stats.py`](usage_stats.py) (such as `voice transcribed`, `transcript cleanup`, `history capture`, `dossier update`, `owner panel`, `settings changed`, or a command such as `history stats`), and `error_occurred` with an error type or code only (such as `stt.failed` or `dossier.timeout`). Each event goes at most once a UTC day. Every event carries the Telesec version, the OS and its version, the CPU architecture, the Python version, `channel` and `mode` (both `plugin`), and a random install ID.
+- **What is sent.** `app_installed` once, `app_started` when the gateway starts, `feature_used` with a name from a fixed list in [`usage_stats.py`](usage_stats.py) (such as `voice transcribed`, `transcript cleanup`, `group transcript`, `group request`, `history capture`, `dossier update`, `owner panel`, `settings changed`, or a command such as `history stats`), and `error_occurred` with an error type or code only (such as `stt.failed` or `dossier.timeout`). Each event goes at most once a UTC day. Every event carries the Telesec version, the OS and its version, the CPU architecture, the Python version, `channel` and `mode` (both `plugin`), and a random install ID.
 - **Never sent.** Message text, transcripts, captions, contact or chat names, chat, user, or connection IDs, file names, paths, settings values, keys, or the text of an error.
 - **The notice.** The gateway sends it once, while the owner has not chosen, at the next Business message or when the owner opens the owner panel or Settings. Only an owner of every connected account gets it, because only that owner can switch usage stats in Settings. It is recorded as sent only once Telegram has accepted it.
 - **Turn them off.** Any one of these: **Don't share** in Settings, `hermes telesec telemetry off`, `TELESEC_TELEMETRY=0`, or `DO_NOT_TRACK=1` in the gateway's environment. Settings and the command apply at the gateway's next event, with no restart; a variable needs a restart. `off` deletes the install ID and the daily counters. Usage stats are also off in CI, in test runs, and in development versions.
@@ -595,15 +641,16 @@ hermes telesec telemetry status --format json
 ## Known limitations
 
 - Native Telegram handlers require Hermes's in-process plugin mode; `plugins.isolation: host` cannot pass the Telegram Application to this plugin.
-- STT currently calls the undocumented core `tools.transcription_tools.transcribe_audio` function. Hermes provides backend-registration APIs but no documented plugin facade to invoke configured STT. This produces a catalog warning and can break on a core update; [submission notes](docs/CATALOG_SUBMISSION.md) explain the dependency.
+- STT calls Hermes's internal `tools.transcription_tools.transcribe_audio`. Hermes has backend-registration APIs but no public plugin API to run the configured STT ([NousResearch/hermes-agent#142505](https://github.com/NousResearch/hermes-agent/issues/142505)). This produces a catalog warning. Hermes plans to move the module after 0.23.1 ([NousResearch/hermes-agent#156570](https://github.com/NousResearch/hermes-agent/pull/156570)), and then the import fails, so `requires_hermes` stops at 0.23.1, the newest release checked against its source (not run live). A Hermes canary build made after the move still reports version 0.23.1 and passes the bound. Tracked in [#118](https://github.com/neoromantic/telesec/issues/118); [submission notes](docs/CATALOG_SUBMISSION.md) explain the dependency.
 - History starts when enabled and captures text only; it cannot retrieve old chats, media, or captions. Transcripts posted before 0.17.1 never reached history, and the upgrade does not add them back. Local history preserves deleted text until retention, an erase, or explicit removal.
 - Dossiers need history and a separate opt-in. They cover private contacts (a chat's 📇 Dossier switch skips one) and keep what they learned after retention prunes history. A dossier is a model's summary and can be wrong; correct it with an owner note. Drafts and automatic replies are planned.
 - Attached-audio speech detection is a heuristic; recognized vocals may pass. LLM cleanup can change meaning; the contact may read the raw transcript before cleanup edits it, and a cleaned reply shows Telegram's "edited" mark. The surface is chosen from the raw text: a raw reply stays a reply even when the cleaned text would fit a caption.
 - Claimed updates stop before Hermes's group-99 ingress counter, which can produce a stale health warning. Telegram permissions and edit/send windows still apply.
+- [Group transcription](#group-transcription) depends on Hermes internals that have no public API. Telesec cannot see whether Hermes accepted or refused a request. In a shared forum topic a request follows Hermes's busy rules and can interrupt another member's turn. Hermes's observe mode for unmentioned messages does not apply to spoken requests. Hermes sends the answer itself, so its own fallbacks decide where it goes when a topic was deleted. A spoken request adds one line to the channel prompt, so in a session that mixes typed and spoken requests Hermes rebuilds its cached agent more often, and its later automatic turns there (such as goal follow-ups) keep that line. Gateways with `multiplex_profiles` are not verified.
 
 ## Failure behavior
 
-- Non-Telegram and non-Business events pass through untouched. Generic documents and video in Business chats are consumed without transcription unless agent routing is explicitly enabled.
+- Non-Telegram and non-Business events pass through untouched, except recordings in a group listed for [group transcription](#group-transcription). Generic documents and video in Business chats are consumed without transcription unless agent routing is explicitly enabled.
 - Media skipped by a chat's [transcription mode](#per-chat-transcription-modes) is claimed before download and posts nothing. A modes file that was never readable, unknown direction under `own`/`peer`, or a failed owner lookup on a connection with no recorded owner transcribe as usual.
 - A chat with [history off](#per-chat-history-and-dossier) records nothing, and so does a chat id that some owner paused while the owner of the update's connection is unknown. A chat the [old server scope](#moving-from-the-history-environment-variables) keeps out records nothing unless its owner turned it on, and an unknown owner counts as not. A `chat-settings.json` that was never readable pauses history and dossiers for every chat.
 - Disabled and pass-through modules do not consume the event's duplicate identity.

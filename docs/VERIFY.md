@@ -14,7 +14,22 @@ History checks must cover one-time opt-in, private-chat defaults, the stored old
 
 Native-handler checks must demonstrate that every Business message/edit/deletion update is consumed after history capture, including owner/contact text, disabled history/transcription, failed history writes, and rejected media. Real PTB updates must also prove that `TELESEC_AGENT_ENABLE=1` permits unhandled updates through, ordinary bot messages continue normally, and text history observation does not spend an LLM call. The transcript surfaces must retain the intended `business_connection_id`, complete text, and UTF-16 entity positions.
 
+Group checks (`tests/test_group_media.py`, real PTB updates) must show that only human members' recordings in a listed group are claimed and never reach Hermes core, that a request is handed off once and only after every transcript part was accepted (to a fake Hermes adapter at the `handle_message` boundary), that a passive transcript starts no task, that forum topics keep their thread, and that duplicates, restarts, the 20 MiB cap, and the two-at-once limit hold.
+
 Release check: deploy the tag to the maintainer's running Hermes gateway, restart it, check that the plugin's handlers are wired and the error log has no plugin lines, then run the [controlled live smoke](#controlled-live-smoke). A clean isolated `hermes plugins validate --install-deps` runs only when asked; the plugin may import only the standard library, PTB, and Hermes core dependencies, so a long-running gateway with extra packages cannot hide a missing one.
+
+## Hermes 0.23.1 source check: 2026-11-16
+
+Hermes `v0.23.1`, commit `3b421578588243f920886e6fe79a6faa87ea026e`, is the upper bound in `requires_hermes`. It was checked against its source, not run. Every Hermes symbol Telesec imports or calls has the same signature as in 0.22.6:
+
+- `tools.transcription_tools.transcribe_audio`;
+- `gateway.platforms.event.MessageEvent` (all fields) and `MessageType.VOICE`;
+- `gateway.platforms.base`: `build_source`, `handle_message`, `resolve_channel_prompt`;
+- the Telegram adapter's `_telegram_require_mention`, `_telegram_free_response_chats`, `_telegram_is_free_response_topic`, and `_resolve_topic_binding`;
+- `PluginContext`: `register_telegram_handler`, `register_hook`, `register_cli_command`, `register_skill`, `register_auxiliary_task`, `get_config`, `llm`;
+- `hermes_constants.get_hermes_home`, `hermes_cli.config.load_config_readonly`, `agent.secret_scope.get_secret`.
+
+The `requires_hermes` parser in 0.21.6, 0.22.6, and 0.23.1 reads commas as AND and checks the bound when it loads a plugin. The published plugin API of 0.23.1 (`hermes_cli/data/plugin_api.json`) lists no way to run the configured STT, and `tools.transcription_tools` is not in it.
 
 ## 0.18.0 release and live checks: 2026-11-15
 
@@ -29,6 +44,8 @@ The maintainer's running gateway got a plugin-only update to the exact tag on He
 - **Renderer delivery: pass, synthetic only.** In a separate process with a made-up `HERMES_HOME`, owner, and connection, and with analytics and other network access blocked, the release code rendered Settings with `Usage stats: off`, **• Don't share**, and **Share usage stats**, and the notice with **Enable usage stats**. The bot sent these two messages, with inert buttons outside the live handlers, to the owner's private chat with it. Telegram accepted both, and the returned text and `<code>` entity matched the rendered output. No button was pressed. This proves delivery of the rendered text, not live default-off or notice-once behaviour.
 - **Client screenshots: not taken.** The UI tool could not open those two messages in the Telegram for macOS window in the background, so no 0.18.0 screenshot exists yet.
 - **Not exercised live.** Steps 2–9 and 11–13 (history, deletions, restart persistence, media and cleanup, Settings and retention, dossiers, panel switches, removal). The offline suite covers them.
+
+||||||| parent of b67bb7c (feat: transcribe voice in Telegram groups (0.19.0))
 
 ## 0.17.1 release and live smoke: 2026-10-30
 
@@ -311,9 +328,15 @@ Use an explicitly selected test Business conversation and the intended Hermes pr
     - **Note.** Add to the owner note with `hermes telesec dossier note --contact … --append "…"` and run `hermes telesec dossier run --contact …`. On a converted note, `--text` without `--replace` must refuse and change nothing. The document must follow the note without copying it, `show --previous` must show the earlier version, and the panel must show the note under "Your note (not posted)".
     - **`/dossier`.** Put a made-up canary text into one message and delete it after the next refresh, and another canary into the owner note. Then send `/dossier` in the control chat. The command must be deleted, the dossier must appear with its title and footer, and neither canary may be in it. `preview --contact … --post` must not contain them either.
 12. In a control chat's panel, tap **🎙️ Transcription ›**, pick a mode, and set it back; switch **🔔 Deletion alerts** off and on. Restart with a due deletion and then one whose correction window has not expired; both must alert without a new Business update. Run terminal maintenance before gateway startup too. Restart after delivery and confirm no repeat; historical classifications must not flood the owner. With alerts on, have the control contact send a made-up text and delete it after a few seconds: one alert must arrive in the owner's private chat with the bot about two minutes later, without the text; **Show text** must add it. A message deleted and sent again with a small typo fix must send nothing.
-13. Disable/remove the plugin and restart. Confirm ordinary Hermes Telegram behavior still works.
+13. Group transcription, in a test group listed in `group_chats`, with synthetic recordings sent from the owner's account only; read only the bot's answers to them. Turn privacy mode off for the bot or make it an admin.
+    - **Mentions required** (`telegram.require_mention: true`). Send an unaddressed voice note: exactly one transcript must reply to it and no assistant answer may follow. Reply to a bot message with a voice note that asks for something simple: a standalone transcript must appear in the same topic, then one assistant answer that replies to the voice note and does not repeat the transcript. Send an audio file with `@yourbot` in its caption: the same request path. Send ordinary text with and without a mention: Hermes must answer as before.
+    - **Topics.** In a forum, repeat the passive voice note in a topic and in General: the transcript must stay in the same topic.
+    - **Log and state.** The gateway log has one `group … transcribed` line per recording (`request=submitted` for a request) and no text, names, or IDs. `group-media.json` holds only keys and stages. Restart the gateway: nothing is posted again.
+    - **Clean up.** Delete the test recordings and the bot's messages, and set `group_chats` and `require_mention` back as they were.
+    - Another member's recordings, the free-response modes, and failures are covered offline only (`tests/test_group_media.py`); say so in the record. Those tests stop at `handle_message` with a fake adapter: they check the event Telesec builds and that a slow handoff does not hold back other transcripts, not how Hermes admits, refuses, or queues it. Real Hermes admission is checked only here, by the request answers above; its refusal and busy rules are not checked.
+14. Disable/remove the plugin and restart. Confirm ordinary Hermes Telegram behavior still works.
 
-Keep evidence free of real contact details and message content. Record Hermes/PTB/Python/model versions and distinguish simulated checks from live Telegram/model results.
+Keep evidence free of real contact details and message content, and the group record free of group names, chat, topic, and message IDs, and host names. Record Hermes/PTB/Python/model versions and distinguish simulated checks from live Telegram/model results.
 
 ## Documentation images
 

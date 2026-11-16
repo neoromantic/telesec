@@ -44,6 +44,7 @@ DETAILS_URL = _telemetry.NOTICE_URL
 # Handler-level names only; the client sends anything else as "other".
 GATEWAY_FEATURES = (
     "voice transcribed", "video note transcribed", "audio file transcribed", "transcript cleanup",
+    "group transcript", "group request",
     "history capture", "dossier update", "dossier post", "stats command",
     "owner panel", "panel mode", "panel chat switch", "panel erase", "panel stats", "panel dossier",
     "settings", "settings changed",

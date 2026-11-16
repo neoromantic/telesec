@@ -86,7 +86,7 @@ def test_migration_never_overwrites_conflicting_destinations(plugin, tmp_path, c
 def test_settings_form_and_environment_overrides(plugin, monkeypatch):
     settings = {"cleanup_style": "enriched", "agent_enable": True}
     schema = yaml.safe_load((Path(__file__).parents[1] / "plugin.yaml").read_text())["config_schema"]
-    assert set(schema) == set(settings)
+    assert set(schema) == {*settings, "group_chats"}  # group_chats is tested in test_group_media.py
     # Removed in 0.11.0 (dossier_enable) and after it (history_enable); each moves into its stored switch once.
     legacy = {**settings, "history_enable": True, "dossier_enable": True}
     ctx = SimpleNamespace(llm=None, get_config=legacy.get, register_telegram_handler=Mock(), register_hook=Mock(),

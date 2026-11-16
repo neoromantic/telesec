@@ -265,15 +265,15 @@ def test_manifest_uses_current_fields():
     assert {key: value for key, value in manifest.items() if key != "config_schema"} == {
         "manifest_version": 2,
         "name": PLUGIN_ID,
-        "version": "0.18.0",
+        "version": "0.19.0",
         "description": (
             "Telesec — Telegram Business secretary for Hermes."
         ),
         "author": "neoromantic",
         "license": "MIT",
         "homepage": "https://telesec.sergeybaus.com",
-        "tags": ["telegram", "business", "voice", "history"],
-        "requires_hermes": ">=0.21.6",
+        "tags": ["telegram", "business", "voice", "history", "groups"],
+        "requires_hermes": ">=0.21.6,<=0.23.1",
         "kind": "standalone",
         "provides_hooks": ["pre_gateway_dispatch"],
     }
@@ -296,7 +296,7 @@ def test_package_metadata_uses_public_product_identity():
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
     assert metadata["name"] == "telesec"
-    assert metadata["version"] == "0.18.0"
+    assert metadata["version"] == "0.19.0"
     assert metadata["description"] == (
         "Telesec — Telegram Business secretary for Hermes."
     )
@@ -588,6 +588,8 @@ def test_cache_paths_are_unique_and_scoped_by_business_connection(plugin, monkey
     assert "business_connection_one_voice_123456789_991_77.ogg" == first_path.name
     assert "business_connection_two_voice_123456789_991_77.ogg" == second_path.name
     assert first_path.parent.name == PLUGIN_ID
+    group_path = plugin._cache_path_for(make_message(business_id=None))
+    assert re.fullmatch(r"group_voice_[0-9a-f]{16}\.ogg", group_path.name)  # Hermes STT logs the name: no IDs
 
 
 @pytest.mark.parametrize(
@@ -1666,6 +1668,36 @@ async def test_failed_repair_after_catastrophic_candidate_falls_back_to_raw(
 
     assert result == raw
     assert llm.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failures_log_no_exception_text(plugin, monkeypatch: pytest.MonkeyPatch, caplog):
+    # Hermes puts a schema error, which can quote the model output, into the exception message.
+    canary = "CANARY-7f3a transcript words"
+    raw = " ".join(f"source{i}" for i in range(100))
+
+    class FailingLlm:
+        def __init__(self, first=None):
+            self.first = first
+
+        async def acomplete_structured(self, **_kwargs):
+            if self.first is not None:
+                first, self.first = self.first, None
+                return SimpleNamespace(parsed={"text": first}, text="")
+            raise ValueError(f"Plugin LLM structured output did not match schema: {canary}")
+
+    async def broken(_transcript):
+        raise ValueError(canary)
+
+    caplog.set_level("DEBUG")
+    assert await plugin._cleanup_transcript(raw, llm=FailingLlm()) == raw
+    assert await plugin._cleanup_transcript(raw, cleanup_fn=broken) == raw
+    monkeypatch.setenv("TELESEC_CLEANUP_STYLE", "enriched")
+    assert await plugin._cleanup_transcript(raw, llm=FailingLlm(first="Короткое резюме.")) == raw
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("(ValueError)" in message for message in messages) == 3
+    assert not any("CANARY" in message for message in messages)
 
 
 @pytest.mark.asyncio

@@ -28,7 +28,7 @@ description: >-
 maintainer: neoromantic
 tier: community
 category: voice
-requires_hermes: ">=0.21.6"
+requires_hermes: ">=0.21.6,<=0.23.1"
 docs_url: https://telesec.sergeybaus.com
 version: "0.10.1"
 image: https://raw.githubusercontent.com/neoromantic/telesec/365ee6665187a3a534ee69b484db95f023a3994d/docs/images/banner.png
@@ -40,6 +40,7 @@ readme: true
 known_issues:
   - Needs in-process plugin mode for native Telegram handlers.
   - Uses the undocumented host STT entrypoint tools.transcription_tools.transcribe_audio.
+  - requires_hermes stops at 0.23.1 because that module moves after it (NousResearch/hermes-agent#156570).
 capabilities:
   provides_tools: []
   provides_hooks:
@@ -102,7 +103,7 @@ The plugin security scanner uses `tools.plugin_guard.scan_plugin`, which applies
 
 The scanner findings are the disclosed local media processes, concurrency-test process, escaped control-character handling/test fixtures, documentation install commands, developer instruction files, and large illustration. No scan exclusions were added. The only admission warning is the STT import disclosed above.
 
-Minimum Hermes version: `0.21.6`, verified with the isolated minimum-version check. Python runtime for validation: 3.14.5; PTB: 22.8. No new Python runtime dependencies are declared by the plugin.
+Minimum Hermes version: `0.21.6`, verified with the isolated minimum-version check. Upper bound: `0.23.1`, checked against its source only, not run live ([VERIFY](VERIFY.md#hermes-0231-source-check-2026-11-16)). The catalog entry must use the same `requires_hermes`, `version`, and full commit SHA as the release. Python runtime for validation: 3.14.5; PTB: 22.8. No new Python runtime dependencies are declared by the plugin.
 
 ## For the next SHA bump
 
@@ -125,3 +126,4 @@ The text above describes the 0.10.1 submission. Since then, unreleased changes n
 - Bot API: transcripts now go out raw first; when cleanup changes the text, the bot edits that same caption or reply in place (`editMessageCaption` or `editMessageText` with the `business_connection_id`) and never posts a second transcript.
 - Bot API: deletion alerts. With history on, when a contact deletes a message that no later message explains, the bot sends a short alert to the owner's private chat with the bot, with **Show text** (on the owner's tap, the bot edits the alert to add the deleted text from saved history) and **Chat panel**. They are on by default and switched in Settings, in a chat's panel, or with `hermes telesec settings set alerts` and `hermes telesec chat set <chat> --alerts`. Nothing goes into the Business chat.
 - UI evidence: `settings.png`, `owner-panel.png`, and `owner-panel-erase.png` must be the 0.17 compact-switch captures before the entry points at 0.17.0 or later.
+- Group transcription (0.19.0): off until the operator lists group chat IDs in `group_chats`. In those groups the bot downloads human members' voice notes, round videos, and audio files, sends transcripts as ordinary bot messages (`sendMessage`, then `editMessageText` after cleanup), and keeps IDs and stages for 24 hours in `HERMES_HOME/data/telesec/group-media.json`. A request is passed to Hermes with `adapter.handle_message(MessageEvent)`, and the trigger settings are read through the Telegram adapter's private getters `_telegram_require_mention`, `_telegram_free_response_chats`, and `_telegram_is_free_response_topic`; both are disclosed as uses of the adapter, which the plugin docs ask plugins to treat as read-only. The description should no longer say Business only, and `known_issues` should name these adapter calls.
