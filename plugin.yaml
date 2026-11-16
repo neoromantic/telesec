@@ -1,15 +1,16 @@
 manifest_version: 2
 name: telesec
-version: 0.18.0
+version: 0.19.0
 description: "Telesec — Telegram Business secretary for Hermes."
 author: neoromantic
 license: MIT
 homepage: https://telesec.sergeybaus.com
-tags: [telegram, business, voice, history]
-requires_hermes: ">=0.21.6"
+tags: [telegram, business, voice, history, groups]
+requires_hermes: ">=0.21.6,<=0.23.1"
 kind: standalone
 provides_hooks:
   - pre_gateway_dispatch
 config_schema:
   cleanup_style: {type: str, default: conservative, choices: [conservative, enriched], description: "Voice transcript cleanup style."}
   agent_enable: {type: bool, default: false, description: "Pass unhandled Business updates to the Hermes agent."}
+  group_chats: {type: list, default: [], description: "Telegram group chat IDs where Telesec transcribes voice notes, video notes and audio. Empty: off."}
