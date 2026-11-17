@@ -18,6 +18,10 @@ Group checks (`tests/test_group_media.py`, real PTB updates) must show that only
 
 Release check: deploy the tag to the maintainer's running Hermes gateway, restart it, check that the plugin's handlers are wired and the error log has no plugin lines, then run the [controlled live smoke](#controlled-live-smoke). A clean isolated `hermes plugins validate --install-deps` runs only when asked; the plugin may import only the standard library, PTB, and Hermes core dependencies, so a long-running gateway with extra packages cannot hide a missing one.
 
+## 0.19.1 release and deploy: 2026-11-17
+
+Released as `v0.19.1` (`e6f00ccbae34846b3674c3263ee046975a1862f6`): only `requires_hermes` changed, to `<=0.23.2` (check below). 2456 tests passed locally (1 skipped), and CI passed on Python 3.11–3.14. The same two Hermes 0.22.6 gateways as for 0.19.0 got a plugin-only update to the exact commit and restarted; Hermes was not updated. On both, `hermes plugins list` showed 0.19.1 enabled, the plugin's native Telegram handlers were wired, and the error log had no new Telesec lines, including no load timeout. The code is the same as 0.19.0, so the live Business and group checks were not repeated.
+
 ## Hermes 0.23.2 local gateway check: 2026-11-17
 
 Hermes `v0.23.2` (`ae2a81ccc00e9b7c06301523e5bb09608397149c`, released after Telesec 0.19.0) is the upper bound since 0.19.1. It ran locally, not against live Telegram: a real `hermes gateway run` from that tag (Python 3.14.7, PTB 22.8) with a made-up `HERMES_HOME`, a local fake Telegram Bot API set as `platforms.telegram.extra.base_url`, a local fake OpenAI-compatible model endpoint, and a Hermes `stt.providers.<name>` command provider that prints a fixed made-up transcript. All IDs, names, and texts were made up; nothing reached Telegram or a real model.
