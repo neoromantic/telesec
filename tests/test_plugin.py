@@ -265,7 +265,7 @@ def test_manifest_uses_current_fields():
     assert {key: value for key, value in manifest.items() if key != "config_schema"} == {
         "manifest_version": 2,
         "name": PLUGIN_ID,
-        "version": "0.19.0",
+        "version": "0.19.1",
         "description": (
             "Telesec — Telegram Business secretary for Hermes."
         ),
@@ -273,7 +273,7 @@ def test_manifest_uses_current_fields():
         "license": "MIT",
         "homepage": "https://telesec.sergeybaus.com",
         "tags": ["telegram", "business", "voice", "history", "groups"],
-        "requires_hermes": ">=0.21.6,<=0.23.1",
+        "requires_hermes": ">=0.21.6,<=0.23.2",
         "kind": "standalone",
         "provides_hooks": ["pre_gateway_dispatch"],
     }
@@ -296,7 +296,7 @@ def test_package_metadata_uses_public_product_identity():
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
     assert metadata["name"] == "telesec"
-    assert metadata["version"] == "0.19.0"
+    assert metadata["version"] == "0.19.1"
     assert metadata["description"] == (
         "Telesec — Telegram Business secretary for Hermes."
     )
