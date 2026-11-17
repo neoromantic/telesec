@@ -18,6 +18,21 @@ Group checks (`tests/test_group_media.py`, real PTB updates) must show that only
 
 Release check: deploy the tag to the maintainer's running Hermes gateway, restart it, check that the plugin's handlers are wired and the error log has no plugin lines, then run the [controlled live smoke](#controlled-live-smoke). A clean isolated `hermes plugins validate --install-deps` runs only when asked; the plugin may import only the standard library, PTB, and Hermes core dependencies, so a long-running gateway with extra packages cannot hide a missing one.
 
+## Hermes 0.23.2 local gateway check: 2026-11-17
+
+Hermes `v0.23.2` (`ae2a81ccc00e9b7c06301523e5bb09608397149c`, released after Telesec 0.19.0) is the upper bound since 0.19.1. It ran locally, not against live Telegram: a real `hermes gateway run` from that tag (Python 3.14.7, PTB 22.8) with a made-up `HERMES_HOME`, a local fake Telegram Bot API set as `platforms.telegram.extra.base_url`, a local fake OpenAI-compatible model endpoint, and a Hermes `stt.providers.<name>` command provider that prints a fixed made-up transcript. All IDs, names, and texts were made up; nothing reached Telegram or a real model.
+
+- **The old bound blocks loading.** With 0.19.0's `<=0.23.1`, the 0.23.2 loader skipped the plugin (`requires hermes >=0.21.6,<=0.23.1, running 0.23.2`), while `hermes plugins list` still showed it as enabled.
+- **Load and register: pass** with `<=0.23.2`. Discovery took under a second, with no load timeout. The plugin registered its `pre_gateway_dispatch` hook, the `telesec` CLI command, one Telegram handler factory, and the `telesec_dossier` model task. The gateway wired its native handlers, `hermes telesec settings` and `mode list` worked, and the error log had no Telesec lines.
+- **Business: pass.** The owner's voice note got its transcript in the caption, and then cleanup through `ctx.llm` (provider and model on the trust allowlist) edited it (`caption_outcome=attached`, `cleanup=edited`). The contact's voice note got a reply with the `business_connection_id`, then the same in-place edit (`reply_fallback`).
+- **Groups: pass**, with `require_mention: true`:
+  - A passive voice note and a passive round video each got one transcript that replied to it, and no agent turn.
+  - A voice note that replied to a bot message and an audio file with `@bot` in its caption each got a standalone transcript, then one agent turn through Hermes's own admission. The model got the raw transcript once (with the reply context or the caption), and the answer replied to the recording.
+  - Each recording was downloaded once, so Hermes did not transcribe it again natively. Ordinary text with a mention got an ordinary Hermes answer.
+  - The same update delivered again did nothing. After a gateway restart nothing was posted again.
+- **Contracts.** Every Hermes symbol listed in the 0.23.1 check below has the same signature in 0.23.2. `transcribe_audio` now returns a refusal inside a Hermes hosted scope, which does not apply to a self-run gateway. The published plugin API of 0.23.2 still lists no way to run the configured STT.
+- **Not covered.** Live Telegram and client rendering, real STT and model quality, forum topics, free-response modes, multiplex profiles, and Hermes's refusal and busy rules for group requests. The harness is not in this repo.
+
 ## Hermes 0.23.1 source check: 2026-11-16
 
 Hermes `v0.23.1`, commit `3b421578588243f920886e6fe79a6faa87ea026e`, is the upper bound in `requires_hermes`. It was checked against its source, not run. Every Hermes symbol Telesec imports or calls has the same signature as in 0.22.6:

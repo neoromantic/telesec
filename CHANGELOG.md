@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.19.1 - 2026-11-17
+
+- Hermes 0.23.2 support: `requires_hermes` is now `>=0.21.6,<=0.23.2`. Hermes 0.23.2 came out after 0.19.0, and its loader skipped Telesec 0.19.0 because of the old `<=0.23.1` bound. No code changes: a local Hermes 0.23.2 gateway loaded Telesec and ran the Business and group paths against a fake Telegram Bot API with synthetic data ([record](docs/VERIFY.md#hermes-0232-local-gateway-check-2026-11-17)). It was not run against live Telegram. Speech-to-text still calls Hermes's internal `tools.transcription_tools`; 0.23.2 still has it, and its planned move (NousResearch/hermes-agent#156570) is not released. [#118](https://github.com/neoromantic/telesec/issues/118) stays open.
+
 ## 0.19.0 - 2026-11-16
 
 - Hermes compatibility: `requires_hermes` is now `>=0.21.6,<=0.23.1`, so Hermes does not load Telesec on a release newer than 0.23.1. Speech-to-text still calls Hermes's internal `tools.transcription_tools`: Hermes has no public STT API for plugins yet (NousResearch/hermes-agent#142505), and the module moves after 0.23.1 (NousResearch/hermes-agent#156570). 0.23.1 was checked against its source, not run. The bound rises when a Telesec release is checked on a newer Hermes. See [#118](https://github.com/neoromantic/telesec/issues/118).

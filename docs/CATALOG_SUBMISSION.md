@@ -28,7 +28,7 @@ description: >-
 maintainer: neoromantic
 tier: community
 category: voice
-requires_hermes: ">=0.21.6,<=0.23.1"
+requires_hermes: ">=0.21.6,<=0.23.2"
 docs_url: https://telesec.sergeybaus.com
 version: "0.10.1"
 image: https://raw.githubusercontent.com/neoromantic/telesec/365ee6665187a3a534ee69b484db95f023a3994d/docs/images/banner.png
@@ -40,7 +40,7 @@ readme: true
 known_issues:
   - Needs in-process plugin mode for native Telegram handlers.
   - Uses the undocumented host STT entrypoint tools.transcription_tools.transcribe_audio.
-  - requires_hermes stops at 0.23.1 because that module moves after it (NousResearch/hermes-agent#156570).
+  - requires_hermes stops at 0.23.2, the newest Hermes checked; NousResearch/hermes-agent#156570 plans to move that module in a future release.
 capabilities:
   provides_tools: []
   provides_hooks:
@@ -103,7 +103,7 @@ The plugin security scanner uses `tools.plugin_guard.scan_plugin`, which applies
 
 The scanner findings are the disclosed local media processes, concurrency-test process, escaped control-character handling/test fixtures, documentation install commands, developer instruction files, and large illustration. No scan exclusions were added. The only admission warning is the STT import disclosed above.
 
-Minimum Hermes version: `0.21.6`, verified with the isolated minimum-version check. Upper bound: `0.23.1`, checked against its source only, not run live ([VERIFY](VERIFY.md#hermes-0231-source-check-2026-11-16)). The catalog entry must use the same `requires_hermes`, `version`, and full commit SHA as the release. Python runtime for validation: 3.14.5; PTB: 22.8. No new Python runtime dependencies are declared by the plugin.
+Minimum Hermes version: `0.21.6`, verified with the isolated minimum-version check. Upper bound: `0.23.2`, run in a local gateway against a fake Telegram Bot API, not live Telegram ([VERIFY](VERIFY.md#hermes-0232-local-gateway-check-2026-11-17)). The catalog entry must use the same `requires_hermes`, `version`, and full commit SHA as the release. Python runtime for validation: 3.14.5; PTB: 22.8. No new Python runtime dependencies are declared by the plugin.
 
 ## For the next SHA bump
 
