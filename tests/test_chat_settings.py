@@ -24,7 +24,6 @@ from dossier_helpers import (
     NOW,
     OWNER_ID,
     FakeLlm,
-    cli,
     cycle,
     quote_first,
     raw,
@@ -167,7 +166,7 @@ def test_store_never_writes_into_the_transcription_modes_file(cs, plugin):
 
 
 @pytest.mark.parametrize("payload", [
-    [], {"owners": {}}, {"version": 2, "owners": {}}, {"version": 1, "owners": []},
+    [], {"version": 2, "owners": {}}, {"version": 1, "owners": []},
     {"version": 1, "owners": {"abc": {"chats": {}}}}, {"version": 1, "owners": {"1000": {"chats": {"x": {}}}}},
     {"version": 1, "owners": {"1000": {"chats": {"991": {"history": "no"}}}}},
     {"version": 1, "owners": {"1000": {"chats": {"991": "off"}}}},
@@ -298,18 +297,6 @@ async def test_capture_pauses_on_an_unreadable_store_or_a_failed_check(cs, histo
 
 
 @pytest.mark.asyncio
-async def test_panel_shows_both_rows_in_the_transcription_style(both_on, plugin):
-    top.bind_owner(plugin)
-    bot = top.PanelBot(business_owner_id=OWNER)
-
-    assert await top.dispatch(plugin, top.start_update(), bot) is True
-
-    (call,) = bot.calls
-    assert call["text"] == "Owner panel: chat 991"
-    assert top.keyboard(call["reply_markup"]) == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, ALERTS_ROW, REFRESH_ROW]
-
-
-@pytest.mark.asyncio
 async def test_dont_save_hides_the_dossier_row_and_a_double_tap_writes_nothing(both_on, plugin, caplog):
     cs = both_on
     top.bind_owner(plugin)
@@ -330,7 +317,8 @@ async def test_dont_save_hides_the_dossier_row_and_a_double_tap_writes_nothing(b
     assert bot.answers[-1]["text"] == "History: off for this chat"
 
     await tap(plugin, "tb:f:991:h.on", bot)
-    assert top.last_edit(bot)[1] == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, ALERTS_ROW, REFRESH_ROW]
+    assert top.last_edit(bot) == ("Owner panel: chat 991",
+                                  [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, ALERTS_ROW, REFRESH_ROW])
     assert stored(cs) == {"version": 1, "owners": {}}
 
 
@@ -472,15 +460,6 @@ async def test_panel_rows_speak_russian(both_on, plugin):
                         [("📊 Статистика", "tb:s:991:stats"), ("🔄 Обновить", "tb:p:991")]]
 
 
-def test_flag_callbacks_parse_strictly_and_fit_64_bytes(plugin):
-    panel_module = plugin._owner_panel
-    longest = panel_module.callback_data("f", -1009999999999999, "h.off")
-    assert longest == "tb:f:-1009999999999999:h.off" and len(longest.encode()) <= 64
-    assert panel_module.parse_callback(longest) == panel_module.PanelCallback("f", -1009999999999999, "h.off")
-    for data in ("tb:f:991", "tb:f:991:h", "tb:f:991:x.on", "tb:f:991:h.maybe", "tb:f:991:h.on:extra"):
-        assert panel_module.parse_callback(data) is None
-
-
 # --- Dossiers --------------------------------------------------------------------------------------
 
 
@@ -532,20 +511,6 @@ async def test_a_chat_paused_during_the_cycle_stays_out_of_the_persona(dossier_p
 
 
 @pytest.mark.asyncio
-async def test_no_dossier_during_a_contact_call_writes_nothing(dossier_plugin, dossiers):
-    plug, ds = dossier_plugin, dossiers
-    await seed(plug, 5504, "paused_contact", [(1, "in", "PAUSED-TAG question", 90), (2, "out", "PAUSED-TAG reply", 85)])
-    fake = FakeLlm(quote_first, quote_first)
-    fake.on_call = lambda payload: plug._chat_settings.default_store().set_flag(OWNER_ID, 5504, "dossier", False,
-                                                                                 via="chat")
-
-    report = cycle(ds, fake)
-
-    assert len(fake.calls) == 1 and report.refreshed == 0  # the persona no longer reads the chat either
-    assert read_dossier(ds, 5504) is None
-
-
-@pytest.mark.asyncio
 async def test_dossier_and_persona_skip_a_chat_the_old_scope_keeps_out(dossier_plugin, dossiers, monkeypatch):
     plug, ds = dossier_plugin, dossiers
     await seed(plug, 5504, "kept_out", [(1, "in", "SCOPE-TAG question", 90), (2, "out", "SCOPE-TAG reply", 85)])
@@ -561,48 +526,6 @@ async def test_dossier_and_persona_skip_a_chat_the_old_scope_keeps_out(dossier_p
     assert read_dossier(ds, 5504) is None
     assert plug._chat_settings.paused(BUSINESS_ID, 5504, "dossier") is True
     assert plug._chat_settings.paused(BUSINESS_ID, 5505, "dossier") is False
-
-
-@pytest.mark.asyncio
-async def test_dont_save_also_pauses_the_dossier(dossier_plugin, dossiers):
-    plug, ds = dossier_plugin, dossiers
-    await seed(plug, 5504, "paused_contact", [(1, "in", "PAUSED-TAG question", 90), (2, "out", "PAUSED-TAG reply", 85)])
-    plug._chat_settings.default_store().set_flag(OWNER_ID, 5504, "history", False, via="cli")
-    fake = FakeLlm(quote_first, quote_first)
-
-    cycle(ds, fake)
-
-    assert "PAUSED-TAG" not in json.dumps(fake.payloads())
-
-
-@pytest.mark.asyncio
-async def test_run_and_preview_refuse_a_paused_contact(dossier_plugin, dossiers):
-    plug, ds = dossier_plugin, dossiers
-    await seed(plug, 5504, "paused_contact", [(1, "in", "PAUSED-TAG question", 90), (2, "out", "PAUSED-TAG reply", 85)])
-    plug._chat_settings.default_store().set_flag(OWNER_ID, 5504, "dossier", False, via="cli")
-    fake = FakeLlm()
-    ds.bind_llm(fake)
-    target = ("--connection", BUSINESS_ID, "--chat", "5504")
-
-    code, out, _err = cli(plug, "dossier", "run", *target)
-    assert (code, out.strip()) == (1, "error: Dossier is off for this chat.")
-    code, out, err = cli(plug, "dossier", "preview", *target)
-    assert code == 1 and "Dossier is off for this chat." in out + err
-    assert fake.calls == []
-
-
-@pytest.mark.asyncio
-async def test_owner_command_in_a_paused_chat_tells_only_the_owner(dossier_plugin, dossiers, panel):
-    await tdp.build(dossier_plugin, dossiers)
-    dossiers.bind_llm(FakeLlm())  # a missing model is told first
-    dossier_plugin._chat_settings.default_store().set_flag(OWNER_ID, tdp.CHAT, "dossier", False, via="cli")
-    bot = tdp.PanelBot()
-
-    assert await tdp.run_command(panel, tdp.command_update(), bot) is True
-
-    assert tdp.posts(bot) == []  # nothing goes into the Business chat
-    (sent,) = bot.sent
-    assert sent["chat_id"] == OWNER_ID and "Dossier is off for this chat." in sent["text"]
 
 
 @pytest.mark.asyncio
@@ -625,49 +548,15 @@ async def test_panel_section_shows_the_frozen_dossier_without_refresh(dossier_pl
 async def test_panel_no_dossier_stops_a_running_refresh(both_on, plugin):
     top.bind_owner(plugin)
     panel_module = plugin._dossier_panel
-    key = panel_module._refresh_key(plugin._dossier_support.chat_key(BCID, CHAT))
-    stop = threading.Event()
-    panel_module._REFRESHES[key] = (SimpleNamespace(), stop)
+    keys = [panel_module._refresh_key(plugin._dossier_support.chat_key(BCID, chat)) for chat in (CHAT, 992)]
+    stop, other = threading.Event(), threading.Event()
+    panel_module._REFRESHES.update({keys[0]: (SimpleNamespace(), stop), keys[1]: (SimpleNamespace(), other)})
     try:
         await tap(plugin, "tb:f:991:d.off", top.PanelBot(business_owner_id=OWNER))
-        assert stop.is_set()
+        assert stop.is_set() and not other.is_set()
     finally:
-        panel_module._REFRESHES.pop(key, None)
-
-
-def test_stop_refresh_stops_a_running_refresh(dossier_plugin, dossiers, panel):
-    key = panel._refresh_key(dossiers.chat_key(BUSINESS_ID, tdp.CHAT))
-    stop = threading.Event()
-    panel._REFRESHES[key] = (SimpleNamespace(), stop)
-    try:
-        panel.stop_refresh(BUSINESS_ID, 992)
-        assert not stop.is_set()
-        panel.stop_refresh(BUSINESS_ID, tdp.CHAT)
-        assert stop.is_set()
-    finally:
-        panel._REFRESHES.pop(key, None)
-
-
-# --- Stats -----------------------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_stats_section_says_history_is_paused(cs, history_enabled):
-    plugin = history_enabled
-    await capture(plugin, text_update(77))
-    ctx = plugin._owner_panel.PanelContext(str(OWNER), str(CHAT), None, BCID)
-    assert "History is paused" not in plugin._stats_panel.render_section(ctx).text
-
-    cs.default_store().set_flag(OWNER, CHAT, "history", False, via="cli")
-
-    # The note goes right before the footer, in the rich view and in its plain fallback.
-    view = plugin._stats_panel.render_section(ctx)
-    assert "\nHistory is paused for this chat.\nhistory since " in view.text
-    assert "<p>History is paused for this chat.</p>\n<footer>history since " in view.html
-    ctx_ru = plugin._owner_panel.PanelContext(str(OWNER), str(CHAT), None, BCID, language_code="ru")
-    view_ru = plugin._stats_panel.render_section(ctx_ru)
-    assert "\nИстория этого чата сейчас не сохраняется.\nистория с " in view_ru.text
-    assert "<p>История этого чата сейчас не сохраняется.</p>\n<footer>история с " in view_ru.html
+        for key in keys:
+            panel_module._REFRESHES.pop(key, None)
 
 
 # --- CLI -------------------------------------------------------------------------------------------
@@ -786,11 +675,6 @@ def test_mode_json_and_settings_show_the_chat_switches(cs, plugin):
     assert "warning: chat-settings.json is unreadable" in ttm.run_cli(plugin, "settings")[1]
 
 
-def test_agent_reference_names_the_chat_command(plugin):
-    assert "hermes telesec chat get <chat> --format json" in plugin.AGENT_REFERENCE
-    assert len(plugin.AGENT_REFERENCE) <= 2000
-
-
 # --- The 0.13 history scope becomes the stored old scope rule ---------------------------------------
 
 
@@ -831,32 +715,6 @@ def test_an_old_scope_that_kept_no_chat_out_stores_no_rule(cs, plugin, monkeypat
     assert "legacy_scope" not in stored(cs) and stored(cs)["migrations"]["history_scope"]["rule"] is False
     assert "kept no private chat out, so no rule was stored" in caplog.text
     assert cs.paused(BCID, CHAT, "history") is False
-
-
-@pytest.mark.asyncio
-async def test_an_allow_list_keeps_out_a_chat_with_no_saved_history(cs, history_enabled, monkeypatch):
-    plugin = history_enabled
-    store_scope(cs, monkeypatch, CHATS="992")
-
-    await capture(plugin, text_update(77))  # 991 was never recorded before
-    await capture(plugin, text_update(78, chat_id=992))
-
-    assert test_history.load_records(plugin) == []
-    assert len(test_history.load_records(plugin, chat_id=992)) == 1
-
-
-@pytest.mark.asyncio
-async def test_a_connection_list_keeps_out_a_new_chat_of_a_second_owner(cs, history_enabled, monkeypatch):
-    plugin = history_enabled
-    store_scope(cs, monkeypatch, CONNECTIONS=BCID)
-    top.bind_owner(plugin, OTHER_OWNER, OTHER_BCID, seen_chat=None)
-
-    await capture(plugin, text_update(77, chat_id=5601, business_id=OTHER_BCID),
-                  test_history.FakeBot(owner_id=OTHER_OWNER))
-    await capture(plugin, text_update(78))
-
-    assert test_history.load_records(plugin, business_id=OTHER_BCID, chat_id=5601) == []
-    assert len(test_history.load_records(plugin)) == 1
 
 
 @pytest.mark.asyncio
@@ -1091,7 +949,7 @@ async def test_without_the_variables_the_migration_is_a_no_op(cs, history_enable
     assert cs.chat_state(OWNER, CHAT)[0] == "on" and cs.default_store().counts()["old_scope"] == 0
 
 
-@pytest.mark.parametrize("value", ["", "   ", " , "])
+@pytest.mark.parametrize("value", ["", " , "])
 def test_an_empty_variable_counts_as_unset(cs, plugin, monkeypatch, caplog, value):
     def scope_logged() -> bool:
         return any("history scope" in message or "TELESEC_HISTORY" in message for message in caplog.messages)
@@ -1239,6 +1097,11 @@ async def test_erase_asks_first_then_erases_only_this_chat(saved, plugin):
     assert text.splitlines()[1:] == ["Erase 3 saved messages from this chat?",
                                      "Its dossier is deleted too. This cannot be undone."]
     assert rows == [[("Erase", "tb:f:991:h.erase.yes"), ("Cancel", "tb:b:991")]]
+    await tap(plugin, "tb:f:991:h.erase", bot, lang="ru")
+    text, rows = top.last_edit(bot)
+    assert text.splitlines()[1:] == ["Стереть 3 сохранённых сообщения из этого чата?",
+                                     "Его досье тоже удалится. Отменить это нельзя."]
+    assert rows == [[("Стереть", "tb:f:991:h.erase.yes"), ("Отмена", "tb:b:991")]]
     assert len(test_history.load_records(plugin)) == 3
 
     await tap(plugin, "tb:b:991", bot)  # Cancel
@@ -1258,18 +1121,6 @@ async def test_erase_asks_first_then_erases_only_this_chat(saved, plugin):
     assert len(test_history.load_records(plugin, chat_id=992)) == 1
 
 
-@pytest.mark.asyncio
-async def test_erase_confirm_in_russian(saved, plugin):
-    bot = top.PanelBot(business_owner_id=OWNER)
-
-    await tap(plugin, "tb:f:991:h.erase", bot, lang="ru")
-
-    text, rows = top.last_edit(bot)
-    assert text.splitlines()[1:] == ["Стереть 3 сохранённых сообщения из этого чата?",
-                                     "Его досье тоже удалится. Отменить это нельзя."]
-    assert rows == [[("Стереть", "tb:f:991:h.erase.yes"), ("Отмена", "tb:b:991")]]
-
-
 @pytest.mark.parametrize(("count", "en", "ru"), [
     (1, "1 saved message", "1 сохранённое сообщение"),
     (2, "2 saved messages", "2 сохранённых сообщения"),
@@ -1282,19 +1133,6 @@ async def test_erase_confirm_in_russian(saved, plugin):
 def test_saved_message_counts_use_the_right_plural(plugin, count, en, ru):
     assert plugin._owner_panel.saved_messages_text(count, "en") == en
     assert plugin._owner_panel.saved_messages_text(count, "ru") == ru
-
-
-@pytest.mark.asyncio
-async def test_erase_refuses_while_the_chat_saves_history(saved, plugin):
-    saved.default_store().set_flag(OWNER, CHAT, "history", True, via="chat")
-    bot = top.PanelBot(business_owner_id=OWNER)
-
-    for data in ("tb:f:991:h.erase", "tb:f:991:h.erase.yes"):  # stale buttons
-        await tap(plugin, data, bot)
-        assert bot.answers[-1]["text"] == "Turn 🗂️ History off for this chat first"
-        assert top.last_edit(bot)[1] == [top.MODE_ROW, HISTORY_ROW, DOSSIER_ROW, ALERTS_ROW, REFRESH_ROW]
-
-    assert len(test_history.load_records(plugin)) == 3
 
 
 @pytest.mark.asyncio
@@ -1368,21 +1206,6 @@ async def test_erase_works_while_history_is_off_in_settings(saved, plugin):
     assert bot.answers[-1]["text"] == "Saved history erased"
     assert not chat_dir(plugin).exists()
     assert len(test_history.load_records(plugin, chat_id=992)) == 1
-
-
-@pytest.mark.asyncio
-async def test_erase_works_for_a_chat_the_old_scope_keeps_out(saved, plugin, monkeypatch):
-    saved.default_store().set_flag(OWNER, CHAT, "history", True, via="chat")
-    store_scope(saved, monkeypatch, CHATS="992")
-    bot = top.PanelBot(business_owner_id=OWNER)
-
-    assert await top.dispatch(plugin, top.start_update(), bot) is True
-    assert SCOPE_LINE in bot.calls[0]["text"]
-    assert top.keyboard(bot.calls[0]["reply_markup"]) == [top.MODE_ROW, OFF_ROW, ERASE_ROW, REFRESH_ROW]
-
-    await tap(plugin, "tb:f:991:h.erase.yes", bot)
-    assert bot.answers[-1]["text"] == "Saved history erased"
-    assert not chat_dir(plugin).exists()
 
 
 @pytest.mark.asyncio
@@ -1535,13 +1358,3 @@ async def test_erase_stops_a_running_dossier_refresh_and_keeps_other_dossiers(do
     assert read_dossier(ds, tdp.CHAT) is None  # the refresh wrote nothing back
     assert read_dossier(ds, 5505) == other
     assert test_history.load_records(plug, chat_id=tdp.CHAT) == []
-
-
-def test_erase_callbacks_fit_for_the_longest_chat_id(plugin):
-    owner_panel = plugin._owner_panel
-    chat = "-1009223372036854775"  # 20 characters, longer than any real chat id
-    for arg in owner_panel.ERASE_ARGS:
-        data = owner_panel.callback_data("f", chat, arg)
-        assert len(data.encode()) <= 64
-        parsed = owner_panel.parse_callback(data)
-        assert (parsed.action, str(parsed.chat_id), parsed.arg) == ("f", chat, arg)

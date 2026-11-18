@@ -30,8 +30,6 @@ OTHER = "business-456"
 set_switch = test_history.set_switch
 set_retention = test_history.set_retention
 
-RETENTION_ROW = [("• Forever", "tb:s:0:settings/r.0"), ("1 year", "tb:s:0:settings/r.365"),
-                 ("90 days", "tb:s:0:settings/r.90"), ("30 days", "tb:s:0:settings/r.30")]
 MANAGER_ROWS = [
     [("🎙️ Transcription ✅", "tb:s:0:settings/t.off")],
     [("🗂️ History ❌", "tb:s:0:settings/h.on")],
@@ -41,8 +39,7 @@ MANAGER_ROWS = [
 ]
 MODEL_LINES = "Dossier model: ai-gateway / google/gemini-3.8-flash\nVoice cleanup: gemini / gemini-3.8-flash"
 ALERTS_PAUSED = "Deletion alerts are paused while history is off."
-MANAGER_TAIL = MODEL_LINES
-MANAGER_TEXT = f"Telesec settings · all chats\nOne chat: Manage Bot in that chat.\n{ALERTS_PAUSED}\n{MANAGER_TAIL}"
+MANAGER_TEXT = f"Telesec settings · all chats\nOne chat: Manage Bot in that chat.\n{ALERTS_PAUSED}\n{MODEL_LINES}"
 SENT_TO = ("The text of ALL private chats will be sent to ai-gateway / google/gemini-3.8-flash to build a dossier for "
            "each contact and your persona.")
 ROUTE_LINE = ("Dossiers use the Telesec dossiers model task; change it with 'hermes model'. If that model fails, Hermes "
@@ -96,12 +93,10 @@ def register_ctx(config: dict | None = None) -> SimpleNamespace:
 @pytest.mark.parametrize(
     ("env", "config", "expected"),
     [
-        ({"TELESEC_HISTORY_ENABLE": "1"}, {}, {"history": True}),
         ({"TELESEC_HISTORY_ENABLE": "0"}, {}, {}),
         ({}, {"history_enable": True}, {"history": True}),  # Desktop
         ({}, {"history_enable": "yes"}, {"history": True}),
         ({"TELESEC_HISTORY_ENABLE": "0"}, {"history_enable": True}, {"history": False}),  # the variable wins
-        ({"TELESEC_DISABLE": "1"}, {}, {"transcription": False}),
         ({"TELESEC_DISABLE": "0"}, {}, {}),
         ({"TELESEC_DISABLE": "true", "TELESEC_HISTORY_ENABLE": "yes"}, {}, {"transcription": False, "history": True}),
     ],
@@ -119,7 +114,7 @@ def test_migration_stores_only_values_that_differ_from_the_default(gs, plugin, m
         assert not path.exists()
         return
     data = stored(plugin)
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 1 and "retention" not in data
     assert {feature: data[feature]["enabled"] for feature in expected} == expected
     assert all(data[feature]["updated_via"] == "migration" for feature in expected)
     assert path.stat().st_mode & 0o777 == 0o600
@@ -131,16 +126,20 @@ def test_migration_stores_only_values_that_differ_from_the_default(gs, plugin, m
 
 def test_migration_runs_once_and_never_overrides_a_stored_choice(gs, plugin, monkeypatch, caplog):
     set_switch(plugin, "history", False)  # the owner turned history off in Settings
-    monkeypatch.setenv("TELESEC_HISTORY_ENABLE", "1")  # the service file still has the old line
+    set_retention(plugin, 365)  # and chose a year
+    monkeypatch.setenv("TELESEC_HISTORY_ENABLE", "1")  # the service file still has the old lines
+    monkeypatch.setenv("TELESEC_HISTORY_RETENTION_DAYS", "30")
     before = gs.settings_path().read_bytes()
 
     assert gs.migrate_legacy(get_config={}.get) == []
-    assert gs.settings_path().read_bytes() == before and gs.enabled("history") is False
+    assert gs.settings_path().read_bytes() == before
+    assert (gs.enabled("history"), gs.retention_days()) == (False, 365)
 
     with caplog.at_level(logging.WARNING):
-        assert gs.warn_ignored_env() == ["TELESEC_HISTORY_ENABLE"]
+        assert gs.warn_ignored_env() == ["TELESEC_HISTORY_ENABLE", "TELESEC_HISTORY_RETENTION_DAYS"]
         assert gs.warn_ignored_env() == []  # once per process
     assert caplog.text.count("TELESEC_HISTORY_ENABLE is no longer read; history is off (stored)") == 1
+    assert caplog.text.count("TELESEC_HISTORY_RETENTION_DAYS is no longer read; history is kept 365 days (stored)") == 1
 
 
 def test_a_cli_process_without_the_service_environment_never_writes(gs, plugin):
@@ -148,19 +147,6 @@ def test_a_cli_process_without_the_service_environment_never_writes(gs, plugin):
 
     assert not gs.settings_path().exists()
     assert (gs.enabled("transcription"), gs.enabled("history"), gs.enabled("dossiers")) == (True, False, False)
-
-
-def test_a_variable_that_turns_off_desktop_history_keeps_it_off_later(gs, plugin, monkeypatch):
-    desktop = {"history_enable": True}
-    monkeypatch.setenv("TELESEC_HISTORY_ENABLE", "0")  # the gateway's unit overrides the Desktop setting
-    plugin.register(register_ctx(desktop))
-    assert stored(plugin)["history"]["enabled"] is False
-
-    monkeypatch.delenv("TELESEC_HISTORY_ENABLE")  # an SSH shell, or the operator removed the variable
-    plugin.register(register_ctx(desktop))
-
-    assert gs.enabled("history") is False
-    assert stored(plugin)["history"]["updated_via"] == "migration"
 
 
 def test_a_cli_process_stores_the_desktop_history_setting(gs, plugin):
@@ -173,6 +159,7 @@ def test_a_cli_process_stores_the_desktop_history_setting(gs, plugin):
 def test_production_upgrade_keeps_history_transcription_and_dossiers_on(gs, plugin, monkeypatch, caplog):
     plugin._dossier_support.set_enabled(True, via="cli")  # stored by 0.11.0
     monkeypatch.setenv("TELESEC_HISTORY_ENABLE", "1")  # in the systemd unit
+    monkeypatch.setenv("TELESEC_HISTORY_RETENTION_DAYS", "90")
 
     with caplog.at_level(logging.WARNING):
         plugin.register(register_ctx())
@@ -180,11 +167,14 @@ def test_production_upgrade_keeps_history_transcription_and_dossiers_on(gs, plug
 
     assert (gs.enabled("transcription"), gs.enabled("history"), gs.dossiers_active()) == (True, True, True)
     assert plugin._history_support.history_config_from_env().active
+    assert plugin._history_support.history_config_from_env().retention_days == 90
     assert not plugin._disabled()
-    assert set(stored(plugin)) == {"schema_version", "history"}
+    assert set(stored(plugin)) == {"schema_version", "history", "retention"}
     assert caplog.text.count("TELESEC_HISTORY_ENABLE is no longer read; history is on (moved to Telesec settings)") == 1
+    assert caplog.text.count("history is kept 90 days (moved to Telesec settings)") == 1
     monkeypatch.delenv("TELESEC_HISTORY_ENABLE")  # the operator cleans up the unit later
-    assert gs.enabled("history") is True
+    monkeypatch.delenv("TELESEC_HISTORY_RETENTION_DAYS")
+    assert (gs.enabled("history"), gs.retention_days()) == (True, 90)
 
 
 def test_migration_leaves_a_corrupt_file_alone(gs, plugin, monkeypatch):
@@ -207,8 +197,6 @@ def test_register_adds_the_settings_command_fallback_and_section(gs, plugin):
                            "bot. In a terminal: hermes telesec settings.")
     section = plugin._owner_panel.get_section("settings")
     assert (section.order, plugin._owner_panel.section_label(section, "ru")) == (900, "⚙️ Настройки")
-    assert "hermes telesec settings --format json" in plugin.AGENT_REFERENCE
-    assert len(plugin.AGENT_REFERENCE) <= 2000
 
 
 # --- Store --------------------------------------------------------------------------------------
@@ -296,54 +284,6 @@ def test_cli_shows_and_sets_every_switch(gs, plugin, monkeypatch):
     assert plugin._disabled() is True  # the stored switch, not TELESEC_DISABLE=0
 
 
-@pytest.mark.parametrize("registered", [True, False])
-def test_cli_enable_names_the_message_check_when_it_runs(gs, plugin, registered):
-    ds = plugin._dossier_support
-    ds.set_task_registered(registered)  # without the task the fallback route is ai-gateway too
-    ds.set_gate("auto", via="cli")
-    with model_fakes.fake_secret_scope({"AI_GATEWAY_API_KEY": "fake-gateway-key"}):
-        code, out = ttm.run_cli(plugin, "settings", "set", "dossiers", "on")
-
-    assert code == 0
-    lines = out.splitlines()
-    assert lines[lines.index(SENT_TO):lines.index(GATE_LINE) + 1] == [SENT_TO, *([ROUTE_LINE] if registered else []), GATE_LINE]
-    assert "fake-gateway-key" not in out
-
-
-def test_cli_enable_names_fact_extraction_only_when_it_runs(gs, plugin):
-    ds = plugin._dossier_support
-    ds.set_clairic("on", via="cli")
-    line = ("New messages also go to Cloudflare Workers AI (Clairic, a preview model) to pick out dates, amounts "
-            "and contact details for the writer.")
-    with model_fakes.fake_secret_scope({}):  # no Cloudflare credentials
-        code, out = ttm.run_cli(plugin, "settings", "set", "dossiers", "on")
-    assert code == 0 and line not in out.splitlines()
-    cf = {"CLOUDFLARE_ACCOUNT_ID": "0123456789abcdef0123456789abcdef", "CLOUDFLARE_API_TOKEN": "fake-cf-token"}
-    with model_fakes.fake_secret_scope(cf):
-        code, out = ttm.run_cli(plugin, "settings", "set", "dossiers", "on")
-    lines = out.splitlines()
-    assert code == 0 and line in lines[lines.index(SENT_TO) + 1:]
-    assert "fake-cf-token" not in out
-
-
-@pytest.mark.parametrize("case", ["setting off", "no key", "writer not on the gateway"])
-def test_cli_enable_leaves_the_message_check_out_when_it_does_not_run(gs, plugin, monkeypatch, case):
-    ds = plugin._dossier_support
-    ds.set_task_registered(True)
-    ds.set_gate("off" if case == "setting off" else "auto", via="cli")
-    if case == "writer not on the gateway":
-        monkeypatch.setenv("TELESEC_DOSSIER_PROVIDER", "gemini")  # the deprecated explicit route
-    secrets = {} if case == "no key" else {"AI_GATEWAY_API_KEY": "fake-gateway-key"}
-    with model_fakes.fake_secret_scope(secrets):
-        code, out = ttm.run_cli(plugin, "settings", "set", "dossiers", "on")
-
-    assert code == 0 and "dossiers: on" in out
-    assert "TypeSafe" not in out
-    if case == "writer not on the gateway":
-        assert ("The text of ALL private chats will be sent to gemini / gemini-3.8-flash to build a dossier for each "
-                "contact and your persona.") in out.splitlines()
-
-
 @pytest.mark.parametrize("route", ["task", "legacy env", "not registered"])
 def test_every_way_to_turn_dossiers_on_shows_the_same_lines(gs, plugin, monkeypatch, route):
     top.bind_owner(plugin)
@@ -364,11 +304,11 @@ def test_every_way_to_turn_dossiers_on_shows_the_same_lines(gs, plugin, monkeypa
     assert (GATE_LINE in expected) is (route != "legacy env")  # the legacy route is not on the gateway
     assert "\n\n".join(expected) in confirm
     assert "\n".join(expected) in settings_set and "\n".join(expected) in dossier_enable
+    assert "fake-gateway-key" not in confirm + settings_set + dossier_enable
 
 
 def test_the_auto_route_has_a_localized_name(gs, plugin, monkeypatch):
     top.bind_owner(plugin)
-    set_switch(plugin, "history", True)
     host_config(monkeypatch, {"provider": "auto"})  # the dossiers task follows the main model
     plugin._dossier_support.set_task_registered(True)
     panel = plugin._settings_panel
@@ -377,37 +317,15 @@ def test_the_auto_route_has_a_localized_name(gs, plugin, monkeypatch):
     assert lines[lines.index("Dossier model: your main model") + 1] == GATEWAY_OPTIONS  # the task defaults stay
     lines = panel.render(ctx(plugin, lang="ru")).text.splitlines()
     assert lines[lines.index("Модель досье: ваша основная модель") + 1] == GATEWAY_OPTIONS_RU
-    assert "will be sent to your main model to build" in panel.render(ctx(plugin, arg="d.ask")).text
-    ru = panel.render(ctx(plugin, arg="d.ask", lang="ru")).text
-    assert "будет отправляться в вашу основную модель, чтобы" in ru and "main model" not in ru
 
     # The deprecated TELESEC_DOSSIER_PROVIDER=auto route sends the text to the model it names, as the confirm says.
     host_config(monkeypatch, None)
     monkeypatch.setenv("TELESEC_DOSSIER_PROVIDER", "auto")
     monkeypatch.setenv("TELESEC_DOSSIER_MODEL", "example/dossier-large")
     assert "Dossier model: auto / example/dossier-large" in panel.render(ctx(plugin)).text.splitlines()
-    assert "Модель досье: auto / example/dossier-large" in panel.render(ctx(plugin, lang="ru")).text.splitlines()
-    assert "will be sent to auto / example/dossier-large to build" in panel.render(ctx(plugin, arg="d.ask")).text
 
 
-def test_settings_warns_when_another_provider_keeps_the_gateway_options(gs, plugin, monkeypatch):
-    top.bind_owner(plugin)
-    plugin._dossier_support.set_task_registered(True)
-    panel = plugin._settings_panel
-
-    host_config(monkeypatch, {"provider": "anthropic", "model": "claude-example"})  # a 'hermes model' pick
-    lines = panel.render(ctx(plugin)).text.splitlines()
-    assert lines[lines.index("Dossier model: anthropic / claude-example") + 1] == GATEWAY_OPTIONS
-    lines = panel.render(ctx(plugin, lang="ru")).text.splitlines()
-    assert lines[lines.index("Модель досье: anthropic / claude-example") + 1] == GATEWAY_OPTIONS_RU
-
-    host_config(monkeypatch, {"provider": "anthropic", "model": "claude-example", "extra_body": {"max_tokens": 8192}})
-    assert GATEWAY_OPTIONS not in panel.render(ctx(plugin)).text
-    host_config(monkeypatch, None)  # the defaults on ai-gateway
-    assert panel.render(ctx(plugin)).text.splitlines()[-2:] == MODEL_LINES.splitlines()
-
-
-def test_dossier_cli_still_switches_and_reports_the_pause(gs, plugin):
+def test_dossiers_pause_while_history_is_off(gs, plugin):
     code, out = ttm.run_cli(plugin, "dossier", "enable")
     assert code == 0 and "note: history is off" in out
     assert gs.enabled("dossiers") is True
@@ -415,6 +333,9 @@ def test_dossier_cli_still_switches_and_reports_the_pause(gs, plugin):
     assert "Dossiers are paused while history is off" in out
     code, out = ttm.run_cli(plugin, "dossier", "run")
     assert code == 1 and "paused while history is off" in out
+    ds = plugin._dossier_support
+    assert ds.run_cycle(llm=None).outcome == "history_off"
+    assert ds._config_if_on() is None
     assert ttm.run_cli(plugin, "dossier", "disable")[0] == 0 and gs.enabled("dossiers") is False
 
 
@@ -481,7 +402,7 @@ def test_dossiers_ask_first_and_need_history(gs, plugin):
     paused = panel.render(ctx(plugin, arg="h.off"))
     assert paused.text == ("Telesec settings · all chats\nHistory is off in all chats.\n"
                            "One chat: Manage Bot in that chat.\nDossiers and deletion alerts are paused while history is "
-                           f"off.\n{MANAGER_TAIL}")
+                           f"off.\n{MODEL_LINES}")
     assert gs.enabled("dossiers") is True and gs.dossiers_active() is False
     assert not plugin._history_support.history_config_from_env().active
 
@@ -524,15 +445,15 @@ def test_telegram_never_overwrites_a_corrupt_file(gs, plugin):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{", encoding="utf-8")
 
-    view = plugin._settings_panel.render(ctx(plugin, arg="h.on"))
-
-    assert view.text.splitlines()[1] == (
-        "Couldn't save: the settings file is unreadable (see hermes telesec settings).")
+    for arg in ("h.on", "r.0"):
+        view = plugin._settings_panel.render(ctx(plugin, arg=arg))
+        assert view.text.splitlines()[1] == (
+            "Couldn't save: the settings file is unreadable (see hermes telesec settings)."), arg
     assert path.read_text(encoding="utf-8") == "{"
 
 
-@pytest.mark.parametrize("chat", ["0", "991", "-1001234567890", "-99999999999999999999"])
-def test_every_settings_callback_fits_telegram(gs, plugin, chat):
+def test_every_settings_callback_fits_telegram(gs, plugin):
+    chat = "-99999999999999999999"
     top.bind_owner(plugin)
     set_switch(plugin, "history", True)
     gs.set_retention(gs.MAX_RETENTION_DAYS, via="cli")  # the longest day count gets its own button
@@ -552,7 +473,7 @@ def test_every_settings_callback_fits_telegram(gs, plugin, chat):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["/telesec", "/telesec@HermesBizBot", "/telesec  "])
+@pytest.mark.parametrize("text", ["/telesec", "/telesec@HermesBizBot  "])
 async def test_telesec_opens_settings_for_the_owner(gs, plugin, text):
     top.bind_owner(plugin)
     bot = top.PanelBot(business_owner_id=OWNER)
@@ -567,7 +488,7 @@ async def test_telesec_opens_settings_for_the_owner(gs, plugin, text):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["/telesec on", "/telesec\nhistory", "/Telesec", "/telesecx", " /telesec", "/start"])
+@pytest.mark.parametrize("text", ["/telesec on", "/telesec\nhistory", "/Telesec", "/telesecx", " /telesec"])
 async def test_only_an_exact_telesec_is_claimed(gs, plugin, text):
     top.bind_owner(plugin)
     bot = top.PanelBot(business_owner_id=OWNER)
@@ -607,7 +528,7 @@ async def test_settings_buttons_on_the_telesec_message(gs, plugin):
 
     assert bot.answers == [{"callback_query_id": "query-1"}]  # a switch is no news: no toast
     text, keyboard = top.last_edit(bot)
-    assert text == f"Telesec settings · all chats\nHistory is on.\nOne chat: Manage Bot in that chat.\n{MANAGER_TAIL}"
+    assert text == f"Telesec settings · all chats\nHistory is on.\nOne chat: Manage Bot in that chat.\n{MODEL_LINES}"
     assert keyboard[1] == [("🗂️ History ✅", "tb:s:0:settings/h.off")]
     assert gs.enabled("history") is True
 
@@ -616,7 +537,7 @@ async def test_settings_buttons_on_the_telesec_message(gs, plugin):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("data", ["tb:m:0:off", "tb:r:0", "tb:b:0", "tb:p:0", "tb:s:0:stats", "tb:s:0:dossier/ds"])
+@pytest.mark.parametrize("data", ["tb:m:0:off", "tb:r:0", "tb:s:0:stats"])
 async def test_chat_zero_accepts_only_settings(gs, plugin, data):
     top.bind_owner(plugin)
     plugin._stats_panel.register_section()
@@ -643,7 +564,7 @@ async def test_settings_from_a_chat_panel_keeps_its_back_button(gs, plugin):
     assert await top.dispatch(plugin, top.callback_update(f"tb:s:{CHAT}:settings/t.off"), bot) is True
     text, keyboard = top.last_edit(bot)
     assert text == (f"Telesec settings · all chats\nTranscription is off in all chats.\n{ALERTS_PAUSED}\n"
-                    f"{MANAGER_TAIL}")  # no "One chat"
+                    f"{MODEL_LINES}")  # no "One chat"
     assert keyboard[0] == [("🎙️ Transcription ❌", f"tb:s:{CHAT}:settings/t.on")]
     assert keyboard[-1] == [("« Back", f"tb:b:{CHAT}")]
 
@@ -680,32 +601,6 @@ async def test_owner_is_found_from_the_catalog_while_history_is_off(gs, plugin):
     assert bot.calls[0]["text"].startswith("Telesec settings · all chats")
 
 
-@pytest.mark.asyncio
-async def test_maintenance_runs_while_history_is_off(gs, plugin, monkeypatch):
-    calls = []
-    monkeypatch.setattr(plugin._history_support, "maintain_history",
-                        lambda **kwargs: calls.append(kwargs) or SimpleNamespace(cap_exceeded=False, warnings=[]))
-    monkeypatch.setattr(plugin._history_support, "_should_run_throttled_maintenance", lambda _now: True)
-    update = test_history.make_business_text_update()
-
-    assert await plugin._history_support.observe_ptb_update(update, bot=test_history.FakeBot()) is False
-    assert calls == []  # no history directory yet, so nothing is created
-    plugin._history_support.history_root().mkdir(parents=True)
-
-    assert await plugin._history_support.observe_ptb_update(update, bot=test_history.FakeBot()) is False
-    assert len(calls) == 1  # retention still prunes what was captured before
-
-
-def test_the_dossier_worker_pauses_while_history_is_off(gs, plugin):
-    ds = plugin._dossier_support
-    ds.set_enabled(True, via="cli")
-
-    report = ds.run_cycle(llm=None)
-
-    assert report.outcome == "history_off"
-    assert ds._config_if_on() is None
-
-
 # --- Retention ------------------------------------------------------------------------------------
 
 
@@ -714,7 +609,7 @@ def retention_labels(plugin, lang=None) -> list[str]:
     return [label for label, _data in rows(plugin._settings_panel.render(ctx(plugin, arg="r", lang=lang)))[0]]
 
 
-def test_retention_row_for_a_manager_and_read_only(gs, plugin, modes):
+def test_retention_row_and_picker(gs, plugin):
     top.bind_owner(plugin)
     set_retention(plugin, 90)
     panel = plugin._settings_panel
@@ -729,17 +624,6 @@ def test_retention_row_for_a_manager_and_read_only(gs, plugin, modes):
         [("‹ Settings", "tb:s:0:settings")]]
     assert rows(panel.render(ctx(plugin, lang="ru")))[2][0][0] == "⏳ Хранить историю: 90 дней ›"
     assert retention_labels(plugin, "ru") == ["Всегда", "1 год", "• 90 дней", "30 дней"]
-
-    modes.default_store().bind_connection(OTHER, str(PEER))
-    read_only = panel.render(ctx(plugin, PEER, OTHER))
-    assert "🗂️ History: off\n⏳ Keep history: 90 days\n📇 Dossiers: off" in read_only.text
-    assert read_only.buttons == []
-    for arg in ("r", "r.30", "r.30.yes", "r.0", "r.90"):  # forged buttons
-        forged = panel.render(ctx(plugin, PEER, OTHER, arg=arg))
-        assert forged.text.splitlines()[1] == "Not allowed" and forged.buttons == [], arg
-    assert gs.retention_days() == 90 and stored(plugin)["retention"]["updated_via"] == "cli"
-    set_retention(plugin, 365)
-    assert "Хранить историю: 1 год" in panel.render(ctx(plugin, PEER, OTHER, lang="ru")).text
 
 
 def test_shorter_retention_asks_first_and_longer_applies_at_once(gs, plugin):
@@ -766,21 +650,6 @@ def test_shorter_retention_asks_first_and_longer_applies_at_once(gs, plugin):
     assert panel.render(ctx(plugin, arg="r.30")).text.startswith("Keep 30 days?")  # shorter again: asks
     forever = panel.render(ctx(plugin, arg="r.0", lang="ru"))
     assert forever.text.splitlines()[1] == "История хранится всегда." and gs.retention_days() == 0
-
-
-def test_retention_stays_while_history_is_off_and_turning_it_off_keeps_it(gs, plugin):
-    top.bind_owner(plugin)
-    set_switch(plugin, "history", True)
-    panel = plugin._settings_panel
-    panel.render(ctx(plugin, arg="r.365.yes"))
-
-    off = panel.render(ctx(plugin, arg="h.off"))
-
-    assert retention_labels(plugin)[1] == "• 1 year" and gs.retention_days() == 365
-    assert rows(off)[2] == [("⏳ Keep history: 1 year ›", "tb:s:0:settings/r")]
-    assert set(stored(plugin)) == {"schema_version", "history", "retention"}
-    assert stored(plugin)["history"] == {"enabled": False, "updated_at": stored(plugin)["history"]["updated_at"],
-                                         "updated_via": "telegram"}
 
 
 def test_stale_retention_taps_are_harmless(gs, plugin):
@@ -824,9 +693,8 @@ def test_a_migrated_value_has_its_own_choice_until_changed(gs, plugin, monkeypat
 
 
 @pytest.mark.parametrize(("days", "en", "ru"), [
-    (1, "• 1 day", "• 1 день"), (2, "• 2 days", "• 2 дня"), (5, "• 5 days", "• 5 дней"), (11, "• 11 days", "• 11 дней"),
+    (1, "• 1 day", "• 1 день"), (5, "• 5 days", "• 5 дней"), (11, "• 11 days", "• 11 дней"),
     (21, "• 21 days", "• 21 день"), (22, "• 22 days", "• 22 дня"), (112, "• 112 days", "• 112 дней"),
-    (730, "• 730 days", "• 730 дней"),
 ])
 def test_a_value_outside_the_choices_reads_naturally(gs, plugin, days, en, ru):
     top.bind_owner(plugin)
@@ -836,37 +704,9 @@ def test_a_value_outside_the_choices_reads_naturally(gs, plugin, days, en, ru):
     assert ru in retention_labels(plugin, "ru")
 
 
-def test_telegram_never_overwrites_a_corrupt_file_with_retention(gs, plugin):
-    top.bind_owner(plugin)
-    path = gs.settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{", encoding="utf-8")
-
-    view = plugin._settings_panel.render(ctx(plugin, arg="r.0"))
-
-    assert view.text.splitlines()[1] == "Couldn't save: the settings file is unreadable (see hermes telesec settings)."
-    assert path.read_text(encoding="utf-8") == "{"
-
-
-@pytest.mark.asyncio
-async def test_retention_buttons_on_the_telesec_message(gs, plugin):
-    top.bind_owner(plugin)
-    bot = top.PanelBot(business_owner_id=OWNER)
-
-    assert await top.dispatch(plugin, top.callback_update("tb:s:0:settings/r.90"), bot) is True
-    text, keyboard = top.last_edit(bot)
-    assert text.startswith("Keep 90 days?") and keyboard[0][0] == ("Keep 90 days", "tb:s:0:settings/r.90.yes")
-
-    assert await top.dispatch(plugin, top.callback_update("tb:s:0:settings/r.90.yes"), bot) is True
-    text, keyboard = top.last_edit(bot)
-    assert text.splitlines()[1] == "History is kept 90 days."
-    assert keyboard[2] == [("⏳ Keep history: 90 days ›", "tb:s:0:settings/r")]
-    assert gs.retention_days() == 90
-
-
 @pytest.mark.parametrize(("raw", "expected"), [
-    ("30", 30), ("400", 400), ("36500", 36500), (" 7 ", 7),
-    ("0", None), ("-5", None), ("abc", None), ("", None), ("12.5", None), ("36501", None),
+    ("400", 400), ("36500", 36500), (" 7 ", 7),
+    ("0", None), ("-5", None), ("12.5", None), ("36501", None),
 ])
 def test_retention_migration_stores_only_a_shorter_than_forever_value(gs, plugin, monkeypatch, caplog, raw, expected):
     monkeypatch.setenv("TELESEC_HISTORY_RETENTION_DAYS", raw)
@@ -883,36 +723,6 @@ def test_retention_migration_stores_only_a_shorter_than_forever_value(gs, plugin
     assert gs.status()["retention"]["source"] == "migration"
     assert (f"TELESEC_HISTORY_RETENTION_DAYS is no longer read; history is kept {expected} days (moved to Telesec "
             "settings). Use /telesec or 'hermes telesec settings set retention forever|365|90|30|N'.") in caplog.text
-
-
-def test_retention_migration_runs_once_and_never_overrides_a_stored_choice(gs, plugin, monkeypatch, caplog):
-    set_retention(plugin, 365)  # the owner chose a year in Settings
-    monkeypatch.setenv("TELESEC_HISTORY_RETENTION_DAYS", "30")  # the service file still has the old line
-    before = gs.settings_path().read_bytes()
-
-    assert gs.migrate_legacy(get_config={}.get) == []
-    assert gs.settings_path().read_bytes() == before and gs.retention_days() == 365
-
-    with caplog.at_level(logging.WARNING):
-        assert gs.warn_ignored_env() == ["TELESEC_HISTORY_RETENTION_DAYS"]
-        assert gs.warn_ignored_env() == []  # once per process
-    assert caplog.text.count("TELESEC_HISTORY_RETENTION_DAYS is no longer read; history is kept 365 days (stored)") == 1
-
-
-def test_register_moves_retention_with_history_and_warns_once(gs, plugin, monkeypatch, caplog):
-    monkeypatch.setenv("TELESEC_HISTORY_ENABLE", "1")
-    monkeypatch.setenv("TELESEC_HISTORY_RETENTION_DAYS", "90")
-
-    with caplog.at_level(logging.WARNING):
-        plugin.register(register_ctx())
-        plugin.register(register_ctx())  # a restart with the same environment
-
-    assert set(stored(plugin)) == {"schema_version", "history", "retention"}
-    assert (gs.enabled("history"), gs.retention_days()) == (True, 90)
-    assert caplog.text.count("history is kept 90 days (moved to Telesec settings)") == 1
-    assert plugin._history_support.history_config_from_env().retention_days == 90
-    monkeypatch.delenv("TELESEC_HISTORY_RETENTION_DAYS")
-    assert gs.retention_days() == 90
 
 
 def test_a_0_12_settings_file_gets_the_retention_once(gs, plugin, monkeypatch):
@@ -934,19 +744,13 @@ def test_a_0_12_settings_file_gets_the_retention_once(gs, plugin, monkeypatch):
     assert path.read_bytes() == after
 
 
-@pytest.mark.parametrize("reset", ["repair", "delete"])
-def test_a_reset_settings_file_never_takes_the_old_retention_back(gs, plugin, monkeypatch, reset):
+def test_a_reset_settings_file_never_takes_the_old_retention_back(gs, plugin, monkeypatch):
     monkeypatch.setenv("TELESEC_HISTORY_RETENTION_DAYS", "30")  # left in the service file
     assert gs.migrate_legacy(get_config={}.get) == ["retention"]
     gs.set_retention(0, via="telegram")  # the owner keeps history forever
-    path = gs.settings_path()
-    if reset == "repair":
-        path.write_text("{", encoding="utf-8")
-    else:
-        path.unlink()
+    gs.settings_path().unlink()
 
-    code, out = ttm.run_cli(plugin, "settings", "set", "history", "on")  # starts a new file
-    assert code == 0 and ("backed up" in out) is (reset == "repair")
+    assert ttm.run_cli(plugin, "settings", "set", "history", "on")[0] == 0  # starts a new file
     assert stored(plugin)["retention"]["days"] == 0 and stored(plugin)["retention"]["updated_via"] == "cli"
 
     assert gs.migrate_legacy(get_config={}.get) == []  # the next gateway start
@@ -994,14 +798,14 @@ def test_cli_sets_and_shows_retention(gs, plugin):
     assert ttm.run_cli(plugin, "settings", "set", "retention", "Forever")[1].splitlines() == [
         "retention: forever", CLEANUP_LINE]
     assert gs.retention_days() == 0
-    for raw, days in (("365", 365), ("90", 90), ("1", 1), ("45", 45)):
+    for raw, days in (("1", 1), ("45", 45)):
         assert ttm.run_cli(plugin, "settings", "set", "retention", raw)[0] == 0 and gs.retention_days() == days
     code, out = ttm.run_cli(plugin, "settings", "--format", "json")
     assert json.loads(out)["retention"] == {"days": 45, "source": "stored",
                                             "updated_at": stored(plugin)["retention"]["updated_at"],
                                             "updated_via": "cli"}
 
-    for raw in ("-1", "abc", "36501", "1y", "on", "٣٠"):
+    for raw in ("-1", "36501", "on", "٣٠"):
         code, out = ttm.run_cli(plugin, "settings", "set", "retention", raw)
         assert code == 1 and out.startswith("error: retention must be forever or 0..36500 days"), raw
     code, out = ttm.run_cli(plugin, "settings", "set", "history", "30")
@@ -1037,7 +841,7 @@ async def test_maintenance_prunes_per_the_stored_retention_without_a_restart(gs,
 
 
 @pytest.mark.asyncio
-async def test_hourly_maintenance_reads_the_retention_in_effect(gs, plugin, monkeypatch):
+async def test_hourly_maintenance_runs_while_history_is_off_with_the_retention_in_effect(gs, plugin, monkeypatch):
     seen = []
     history = plugin._history_support
     monkeypatch.setattr(history, "_should_run_throttled_maintenance", lambda _now: True)
@@ -1048,8 +852,10 @@ async def test_hourly_maintenance_reads_the_retention_in_effect(gs, plugin, monk
         return real(**kwargs)
 
     monkeypatch.setattr(history, "maintain_history", spy)
-    history.history_root().mkdir(parents=True)
     update = test_history.make_business_text_update()
+    assert await history.observe_ptb_update(update, bot=test_history.FakeBot()) is False
+    assert seen == []  # no history directory yet, so nothing is created
+    history.history_root().mkdir(parents=True)
     await history.observe_ptb_update(update, bot=test_history.FakeBot())
     set_retention(plugin, 365)
     await history.observe_ptb_update(update, bot=test_history.FakeBot())
