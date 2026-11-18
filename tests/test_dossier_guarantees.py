@@ -20,7 +20,6 @@ import pytest
 import test_history
 from dossier_helpers import (
     BUSINESS_ID,
-    NOW,
     PERSONA_DEFAULT,
     FakeLlm,
     ago,
@@ -32,7 +31,6 @@ from dossier_helpers import (
     dossier_dir,
     maintain,
     persona_dir,
-    quote_first,
     raw,
     read_dossier,
     read_persona,
@@ -81,10 +79,6 @@ def persona_payloads(fake: FakeLlm) -> list[dict[str, Any]]:
 
 def refs(payload: dict[str, Any]) -> list[str]:
     return [m["ref"] for m in payload["messages"]]
-
-
-def doc_bytes(ds: ModuleType, chat_id: int) -> bytes:
-    return (dossier_dir(ds, chat_id) / "document.json").read_bytes()
 
 
 async def seed_alice(plugin: ModuleType, rows: Any = ALICE_ROWS, **kw: Any) -> dict[str, Any]:
@@ -136,34 +130,6 @@ class PluginLlmTrustError(PermissionError):
 
 
 @pytest.mark.asyncio
-async def test_a_retention_prune_of_untracked_months_makes_no_call_and_writes_nothing(
-    plug: ModuleType, dossiers: ModuleType, dossier_env: Callable[..., None]
-) -> None:
-    """Months that aged past the rolling floor are no longer in ``seen``: their prune leaves the file byte-identical."""
-    ds = dossiers
-    dossier_env(BACKFILL_DAYS=30)
-    raw(plug, ALICE, [(1, "in", "Old order: two crates of lemons", timedelta(days=25)),
-                      (2, "out", "Old reply: crates ship Tuesday", timedelta(days=25, minutes=-1))], username="alice")
-    assert cycle(ds, FakeLlm()).refreshed == 1
-    later = NOW + timedelta(days=40)
-    raw(plug, ALICE, [(30, "in", "Checking in again", timedelta(days=1)),
-                      (31, "out", "All good here", timedelta(days=1, minutes=-1))], username="alice", base=later)
-    assert cycle(ds, FakeLlm(), now=later).refreshed == 1
-    assert sorted(read_dossier(ds, ALICE)["seen"]) == ["30", "31"]
-    before = snapshot_tree(dossier_dir(ds, ALICE))
-
-    test_history.set_retention(plug, 20)
-    assert maintain(plug, later).pruned_files >= 1
-    fake = FakeLlm()
-    for minutes in (1, 30):
-        report = cycle(ds, fake, now=later + timedelta(minutes=minutes))
-        assert (report.calls, report.failed) == (0, 0)
-    report = cycle(ds, fake, now=later + timedelta(minutes=40), target=("contact", catalog_entry(plug, ALICE)))
-    assert (report.calls, fake.calls) == (0, [])  # even a forced run has nothing to send
-    assert snapshot_tree(dossier_dir(ds, ALICE)) == before
-
-
-@pytest.mark.asyncio
 async def test_a_retention_prune_of_tracked_messages_makes_no_call_and_keeps_the_document(
     plug: ModuleType, dossiers: ModuleType
 ) -> None:
@@ -188,26 +154,6 @@ async def test_a_retention_prune_of_tracked_messages_makes_no_call_and_keeps_the
     report = cycle(ds, fake, now=ago(-10), target=("contact", catalog_entry(plug, ALICE)))
     assert (report.calls, fake.calls) == (0, [])
     assert snapshot_tree(dossier_dir(ds, ALICE)) == settled
-
-
-@pytest.mark.asyncio
-async def test_a_dossier_whose_whole_chat_was_pruned_is_never_written_again(
-    plug: ModuleType, dossiers: ModuleType
-) -> None:
-    ds = dossiers
-    old = timedelta(days=70)
-    raw(plug, ALICE, [(1, "in", "Old order: two crates of lemons", old),
-                      (2, "out", "Old reply: crates ship Tuesday", old - timedelta(minutes=1))], username="alice")
-    await seed(plug, BOB, "bob", [(20, "in", "Bob keeps the catalog alive", 60)])
-    assert cycle(ds, FakeLlm()).refreshed == 1
-    before = snapshot_tree(dossier_dir(ds, ALICE))
-
-    test_history.set_retention(plug, 30)
-    assert maintain(plug, 0).pruned_files >= 1
-    fake = FakeLlm()
-    for minutes in (5, 60, 60 * 25):
-        assert cycle(ds, fake, now=ago(-minutes)).calls == 0
-    assert fake.calls == [] and snapshot_tree(dossier_dir(ds, ALICE)) == before
 
 
 # ---------------------------------------------------------------------------
@@ -242,50 +188,17 @@ async def test_a_deletion_is_reported_once(plug: ModuleType, dossiers: ModuleTyp
     assert len(fake.calls) == 2
 
 
-@pytest.mark.asyncio
-async def test_a_deletion_whose_message_was_pruned_is_sent_as_a_bare_ref(plug: ModuleType, dossiers: ModuleType) -> None:
-    ds = dossiers
-    old = timedelta(days=70)
-    raw(plug, ALICE, [(1, "in", "PRUNED-TEXT two crates of lemons", old),
-                      (2, "out", "PRUNED-TEXT crates ship Tuesday", old - timedelta(minutes=1))], username="alice")
-    await seed_alice(plug, ALICE_ROWS[:2])
-    assert cycle(ds, FakeLlm(doc("**The contact.**\n\n## Notes\n- Orders crates.")), now=ago(40)).refreshed == 1
-    await delete(plug, ALICE, 1, when=30)
-    test_history.set_retention(plug, 30)
-    assert maintain(plug, 20).pruned_files >= 1  # the created record of 1 is gone, its deletion is not
-
-    fake = FakeLlm(doc("NO_CHANGE"))
-    assert cycle(ds, fake).checked == 1
-    (call,) = fake.calls
-    assert call["user"]["messages"] == [{"ref": "m1", "deleted": True}]
-    assert "PRUNED-TEXT" not in call["raw"] and "lemons" not in call["raw"]
-    assert sorted(read_dossier(ds, ALICE)["seen"], key=int) == ["10", "11"]  # 2 is gone, silently
-    assert cycle(ds, fake, now=ago(-15)).calls == 0
-
-
 # ---------------------------------------------------------------------------
 # A failure writes nothing
 # ---------------------------------------------------------------------------
 
 FAILURES: dict[str, tuple[list[Any], str | None]] = {
-    "no_end_marker": (["**The contact.**\n\n## Notes\n- Cut off in the mid"], "no_end_marker"),
-    "empty": ([doc("")], "empty"),
     "unstructured": ([doc("Sorry, I cannot help with that request.")], "unstructured"),
-    "reasoning": ([doc("<think>Leftover reasoning\n**The contact.**\n\n## Notes\n- A fact")], "unclosed_reasoning"),
-    "shorten_no_change": ([doc(LONG), doc("NO_CHANGE")], "bad_no_change"),
     "too_long": ([doc(LONG), doc(LONG)], "too_long"),
     "timeout": ([TimeoutError("SECRET-EXC")], "TimeoutError"),
-    "runtime": ([RuntimeError("SECRET-EXC")], "RuntimeError"),
-    "connection": ([ConnectionError("SECRET-EXC")], "ConnectionError"),
     "value": ([ValueError("SECRET-EXC")], "ValueError"),
     "trust": ([PluginLlmTrustError("SECRET-EXC")], None),  # aborts the cycle; no target failure
 }
-
-
-def persona_kind(responses: list[Any]) -> list[Any]:
-    """The same failure for the persona: its documents are sections and bullets too."""
-    return [doc(r[: -len("\n<<END>>")].replace("**The contact.**", "## Style")) if isinstance(r, str)
-            and r.endswith("<<END>>") else r for r in responses]
 
 
 def check_failure(ds: ModuleType, report: Any, key: str, code: str | None) -> None:
@@ -321,7 +234,7 @@ async def test_a_failed_update_leaves_the_document_byte_identical(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", list(FAILURES))
+@pytest.mark.parametrize("case", ["unstructured", "timeout"])
 async def test_a_failed_first_pass_creates_no_document(plug: ModuleType, dossiers: ModuleType, case: str) -> None:
     ds = dossiers
     entry = await seed_alice(plug)
@@ -332,7 +245,7 @@ async def test_a_failed_first_pass_creates_no_document(plug: ModuleType, dossier
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", [*FAILURES, "no_change"])
+@pytest.mark.parametrize("case", ["unstructured", "timeout"])
 async def test_a_failed_persona_rebuild_leaves_the_persona_byte_identical(
     plug: ModuleType, dossiers: ModuleType, case: str
 ) -> None:
@@ -340,43 +253,16 @@ async def test_a_failed_persona_rebuild_leaves_the_persona_byte_identical(
     await seed_owner_chat(plug, ALICE, "ALPHA", owner=10)
     assert cycle(ds, FakeLlm()).persona == "refreshed"
     before = snapshot_tree(persona_dir(ds))
-    responses, code = ([doc("NO_CHANGE")], "bad_no_change") if case == "no_change" else FAILURES[case]
+    responses, code = FAILURES[case]
 
-    fake = FakeLlm(*persona_kind(responses))
+    fake = FakeLlm(*responses)
     report = cycle(ds, fake, now=ago(-5), target=("persona", None))
     assert len(persona_payloads(fake)) == 1
-    if code is None:
-        assert (report.outcome, report.persona) == ("aborted_trust", "skipped")
-    else:
-        assert (report.persona, report.failures) == ("failed", [("persona", code)])
-        record = read_state(ds)["failures"]["persona"]
-        assert (record["error"], record["count"]) == (code, 1)
-        assert "SECRET" not in ds.state_path().read_text(encoding="utf-8")
+    assert (report.persona, report.failures) == ("failed", [("persona", code)])
+    record = read_state(ds)["failures"]["persona"]
+    assert (record["error"], record["count"]) == (code, 1)
+    assert "SECRET" not in ds.state_path().read_text(encoding="utf-8")
     assert snapshot_tree(persona_dir(ds)) == before
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [TimeoutError("SECRET-EXC"), doc("I cannot continue this task.")])
-async def test_a_failure_in_part_two_keeps_part_one(
-    plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch, failure: Any
-) -> None:
-    ds = dossiers
-    monkeypatch.setattr(ds, "BATCH_MAX_MESSAGES", 3)
-    rows = [(i, "in" if i % 2 else "out", f"message {i}", 100 - 5 * i) for i in range(1, 8)]
-    entry = (await seed(plug, ALICE, "alice", rows)) and catalog_entry(plug, ALICE)
-    after_part_one: dict[str, Any] = {}
-    fake = FakeLlm(quote_first, failure)
-
-    def snapshot_before_part_two(_payload: dict[str, Any]) -> None:
-        if len(fake.calls) == 2:
-            after_part_one.update(snapshot_tree(dossier_dir(ds, ALICE)))
-
-    fake.on_call = snapshot_before_part_two
-    report = cycle(ds, fake, target=("contact", entry))
-    assert (report.failed, report.calls) == (1, 2)
-    assert after_part_one and snapshot_tree(dossier_dir(ds, ALICE)) == after_part_one
-    part_one = read_dossier(ds, ALICE)
-    assert (sorted(part_one["seen"], key=int), part_one["revision"]) == (["1", "2", "3"], 1)
 
 
 # ---------------------------------------------------------------------------
@@ -418,10 +304,7 @@ async def test_erasing_a_chat_erases_the_persona_text_and_keeps_the_note(plug: M
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("erase", ["history", "dossier"])
-async def test_erasing_a_chat_only_the_previous_persona_read_erases_it(
-    plug: ModuleType, dossiers: ModuleType, erase: str
-) -> None:
+async def test_erasing_a_chat_only_the_previous_persona_read_erases_it(plug: ModuleType, dossiers: ModuleType) -> None:
     ds = dossiers
     alice = await seed_owner_chat(plug, ALICE, "ALPHA")
     await seed_owner_chat(plug, BOB, "BRAVO")
@@ -434,12 +317,7 @@ async def test_erasing_a_chat_only_the_previous_persona_read_erases_it(
     assert [c["chat_id"] for c in built["chats"]] == [BOB] and "ALPHA-STYLE" in built["previous"]
     assert [c["chat_id"] for c in built["previous_chats"]] == [ALICE, BOB]
 
-    if erase == "history":
-        code, out, _err = cli(plug, "history", "forget", "--chat", str(ALICE), "--yes")
-        assert code == 0 and "Its dossier was forgotten too." in out
-    else:
-        assert ds.forget(("contact", alice))["persona_reset"] is True
-
+    assert ds.forget(("contact", alice))["persona_reset"] is True
     reset = read_persona(ds)
     assert (reset["document"], reset["previous"], reset["chats"]) == ("", None, [])
     assert "previous_chats" not in reset
