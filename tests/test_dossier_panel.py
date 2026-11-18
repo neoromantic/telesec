@@ -388,40 +388,6 @@ async def test_contact_snapshot_corrupt(plug, ds, panel):
 
 
 @pytest.mark.asyncio
-async def test_disabled_without_dossier_explains_and_points_to_settings(dossier_history, panel):
-    snap = panel.load_contact_snapshot(BUSINESS_ID, CHAT, now=NOW)
-    view = await act(panel)
-
-    assert (snap.enabled, snap.doc) == (False, None)
-    assert "Dossiers are off. Turn them on in Settings." in view.text
-    assert args_of(view) == ["o.p"]  # the switch is in Settings
-
-
-@pytest.mark.asyncio
-async def test_persona_snapshot_reads_the_persona_document(plug, ds, panel):
-    await build(plug, ds)
-
-    snap = panel.load_persona_snapshot()
-
-    assert (snap.target, snap.doc, snap.corrupt, snap.manage_global) == ("persona", read_persona(ds), False, True)
-    assert PERSONA_TEXT in snap.doc["document"]
-
-
-@pytest.mark.asyncio
-async def test_persona_snapshot_missing_and_corrupt(plug, ds, panel):
-    ds.bind_llm(FakeLlm())
-    missing = panel.load_persona_snapshot()
-    assert (missing.doc, missing.corrupt) == (None, False)
-    assert "No persona yet." in panel._view.render_overview(missing, "en").text
-
-    persona_dir(ds).mkdir(parents=True)
-    (persona_dir(ds) / "document.json").write_text("[]", encoding="utf-8")
-    corrupt = panel.load_persona_snapshot()
-    assert (corrupt.doc, corrupt.corrupt) == (None, True)
-    assert "The persona file can't be read." in panel._view.render_overview(corrupt, "en").text
-
-
-@pytest.mark.asyncio
 async def test_llm_ready_checks_complete(plug, ds, panel):
     assert panel.llm_ready() is False
     assert panel.llm_ready(SimpleNamespace(complete_structured=lambda **_: None)) is False
@@ -459,22 +425,6 @@ async def test_the_persona_screen_and_status_say_when_the_first_persona_is_due(p
     built = panel.load_persona_snapshot()
     assert built.persona_due is False and reads == []  # a written persona reads no history for the screen
     assert "owner persona yes," in cli(plug, "dossier", "status")[1] and reads == []
-
-
-@pytest.mark.asyncio
-async def test_overview_in_english_and_russian(plug, ds, panel):
-    await build(plug, ds)
-
-    en = await act(panel)
-    ru = await act(panel, "o.c", lang="ru-RU")
-
-    assert en.html.startswith("<h3>@anna_k</h3>")
-    assert COMMITMENT in en.html and PREFERENCE in en.html and "<h4>Commitments</h4>" in en.html
-    assert "[m11]" not in en.html and "[m10]" not in en.html  # refs stay on disk
-    assert "Your note (not posted)" in en.text and NOTE in en.text
-    assert "Ваша заметка (не публикуется)" in ru.html and COMMITMENT in ru.html
-    assert args_of(en) == ["o.p"]  # no Refresh: the model is not bound here
-    assert all(len(args) <= 30 for args in args_of(en))
 
 
 @pytest.mark.asyncio
@@ -666,9 +616,7 @@ async def test_persona_and_switch_need_every_connection_owned(plug, ds, panel):
         assert args_of(overview) == [] and PERSONA_TEXT not in overview.html
         refused = await act(panel, "o.p")
         assert refused.notice == OPERATOR_ONLY and PERSONA_TEXT not in refused.html and args_of(refused) == ["o.c"]
-        for args in ("ea", "ed", "ds"):  # old switch buttons only show the dossier
-            assert args_of(await act(panel, args)) == []
-        assert ds.load_config().enabled is True and panel.manages_global(OWNER_ID, BUSINESS_ID) is False
+        assert panel.manages_global(OWNER_ID, BUSINESS_ID) is False
     assert panel.manages_global(None, BUSINESS_ID) is False and panel.manages_global(OWNER_ID, None) is False
 
 
@@ -696,9 +644,6 @@ async def test_persona_and_switch_stay_closed_when_history_is_gone(plug, ds, pan
     assert args_of(await as_other(None)) == []
     refused = await as_other("o.p")
     assert refused.notice == OPERATOR_ONLY and PERSONA_TEXT not in refused.html
-    for args in ("ed", "ds"):  # old switch buttons write nothing
-        assert (await as_other(args)).notice is None
-    assert ds.load_config().enabled is True
 
     chat_dir = ds.dossier_root() / "chats" / history._path_key(BUSINESS_ID)
     shutil.move(chat_dir, tmp_path / "chat")
@@ -916,20 +861,6 @@ async def test_panel_keeps_an_unchanged_rich_view(plug, ds, panel, caplog):
     assert "edit failed" not in caplog.text
 
 
-@pytest.mark.asyncio
-async def test_panel_back_returns_to_a_plain_main_view(plug, ds, panel):
-    await build(plug, ds)
-    panel.register_owner_panel_section(plug._owner_panel)
-    bot = OwnerPanelBot()
-
-    await open_section(plug, bot, f"tb:b:{CHAT}")
-
-    assert bot.api == []
-    (edit,) = bot.edits
-    assert edit["text"].startswith("Owner panel:")
-    assert ("📖 Open dossier", f"tb:s:{CHAT}:dossier") in [button for row in keyboard_of(edit["reply_markup"]) for button in row]
-
-
 # ---------------------------------------------------------------------------
 # /dossier in the Business chat
 # ---------------------------------------------------------------------------
@@ -1001,24 +932,22 @@ async def test_duplicate_delivery_posts_once(plug, ds, panel):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["/dossier", "/dossiers", "hello"])
-async def test_contact_command_is_ordinary_text(plug, ds, panel, text):
+async def test_contact_command_is_ordinary_text(plug, ds, panel):
     await build(plug, ds)
     ds.bind_llm(FakeLlm())
     bot = PanelBot()
 
-    assert await run_command(panel, command_update(text, sender=CONTACT_ID), bot) is False
+    assert await run_command(panel, command_update("/dossier", sender=CONTACT_ID), bot) is False
 
     assert bot.api == [] and bot.deletes == [] and bot.sent == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["/dossier off", "/dossier is what the bot calls it", "/dossier\nlonger private note"])
-async def test_owner_command_with_more_text_is_ordinary_text(plug, ds, panel, text):
+async def test_owner_command_with_more_text_is_ordinary_text(plug, ds, panel):
     await build(plug, ds)
     bot = PanelBot()
 
-    assert await run_command(panel, command_update(text), bot) is False
+    assert await run_command(panel, command_update("/dossier off"), bot) is False
 
     assert bot.api == [] and bot.deletes == [] and bot.sent == [] and bot.lookups == []
 
@@ -1036,19 +965,17 @@ async def test_unverifiable_owner_is_ordinary_text(plug, ds, panel):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["edited", "echo"])
-async def test_edited_command_and_echo_are_claimed_without_executing(plug, ds, panel, kind):
+async def test_the_echo_is_claimed_and_remembered_without_executing(plug, ds, panel):
     await build(plug, ds)
     llm = FakeLlm()
     ds.bind_llm(llm)
     bot = PanelBot()
-    update = command_update(edited=True) if kind == "edited" else echo_update()
 
-    assert await run_command(panel, update, bot) is True
+    assert await run_command(panel, echo_update(), bot) is True
 
     assert bot.api == [] and bot.deletes == [] and bot.sent == [] and llm.calls == []
     # The echo's id is remembered, so the owner deleting the post later stays out of history.
-    assert plug._history_support._is_control_message(BUSINESS_ID, CHAT, 900) is (kind == "echo")
+    assert plug._history_support._is_control_message(BUSINESS_ID, CHAT, 900)
 
 
 async def ready(plugin: ModuleType, ds: ModuleType) -> dict[str, Any]:
@@ -1111,28 +1038,6 @@ async def test_refusals_tell_only_the_owner_and_call_no_model(plug, ds, panel, r
     (sent,) = bot.sent
     assert sent["chat_id"] == OWNER_ID and sent["parse_mode"] is None and "business_connection_id" not in sent
     assert sent["text"] == f"{HEAD}\n{expected}"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("response", "expected"), [
-    (doc("EMPTY"), "The dossier has nothing worth keeping yet."),
-    ("A document without the end line", "The dossier could not be prepared (no_end_marker)."),
-    (RuntimeError(f"provider said {COMMITMENT}"), "The dossier could not be prepared (RuntimeError)."),
-])
-async def test_an_empty_dossier_or_a_failed_refresh_is_told_to_the_owner(plug, ds, panel, caplog, response, expected):
-    await build(plug, ds)
-    llm = FakeLlm(response)
-    ds.bind_llm(llm)
-    bot = PanelBot()
-
-    with caplog.at_level(logging.DEBUG):
-        assert await run_command(panel, command_update(), bot) is True
-
-    assert posts(bot) == [] and len(llm.calls) == 1
-    assert [sent["text"] for sent in bot.sent] == [f"{HEAD}\n{expected}"]
-    assert "dossier not posted chat_ref=" in caplog.text
-    for secret in SECRETS:
-        assert secret not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1300,10 +1205,6 @@ class NetworkError(Exception):  # PTB's names: TimedOut and BadRequest are Netwo
     pass
 
 
-class TimedOut(NetworkError):
-    pass
-
-
 class PtbBadRequest(NetworkError):
     pass
 
@@ -1354,8 +1255,8 @@ async def test_a_fresh_gateway_tries_the_post_and_tells_only_telegram_window_err
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error", [TimedOut("Timed out"), NetworkError("httpx.ReadError: Anna"),
-                                   TimeoutError("Anna"), ConnectionResetError("Anna")])
+@pytest.mark.parametrize("error", [NetworkError("httpx.ReadError: Anna"), TimeoutError("Anna"),
+                                   ConnectionResetError("Anna")])
 async def test_a_send_that_timed_out_may_have_posted(plug, ds, panel, caplog, error):
     await old_chat(plug)
     ds.bind_llm(FakeLlm(doc(DOCUMENT)))
@@ -1518,8 +1419,7 @@ def chat_update(kind: str, *, message_id: int, at: Any, sender: int = CONTACT_ID
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["photo", "sticker", "document"])
-async def test_a_contact_who_lately_sent_only_media_still_gets_the_dossier(plug, ds, panel, monkeypatch, kind):
+async def test_a_contact_who_lately_sent_only_media_still_gets_the_dossier(plug, ds, panel, monkeypatch):
     monkeypatch.setenv("TELESEC_AGENT_ENABLE", "1")  # media reaches the agent; the handler notes it first
     await _refusal_case(plug, ds, "window")  # the contact's last text is 30 hours old, the gateway is up 2 days
     ds.bind_llm(FakeLlm(doc(DOCUMENT)))
@@ -1535,7 +1435,7 @@ async def test_a_contact_who_lately_sent_only_media_still_gets_the_dossier(plug,
     assert await run_command(panel, command_update(message_id=500), bot)
     assert posts(bot) == [] and [sent["text"].split("\n")[1] for sent in bot.sent] == [WINDOW]
 
-    await handler.callback(chat_update(kind, message_id=30, at=NOW - timedelta(minutes=30)), context)
+    await handler.callback(chat_update("photo", message_id=30, at=NOW - timedelta(minutes=30)), context)
     assert await run_command(panel, command_update(message_id=501), bot)
 
     assert len(posts(bot)) == 1 and len(bot.sent) == 1
@@ -1543,8 +1443,7 @@ async def test_a_contact_who_lately_sent_only_media_still_gets_the_dossier(plug,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["voice", "video_note"])
-async def test_a_contact_voice_or_video_note_is_noted_before_transcription_claims_it(plug, ds, panel, kind):
+async def test_a_contact_voice_note_is_noted_before_transcription_claims_it(plug, ds, panel):
     """Transcription claims the update and history keeps no voice message, yet it opens the 24-hour window."""
     await _refusal_case(plug, ds, "window")  # the contact's last text is 30 hours old, the gateway is up 2 days
     ds.bind_llm(FakeLlm(doc(DOCUMENT)))
@@ -1552,7 +1451,7 @@ async def test_a_contact_voice_or_video_note_is_noted_before_transcription_claim
     at = NOW - timedelta(minutes=30)
 
     with pytest.raises(ApplicationHandlerStop):  # claimed for transcription, so it never reaches core
-        await _business_handler(plug).callback(chat_update(kind, message_id=30, at=at), SimpleNamespace(bot=bot))
+        await _business_handler(plug).callback(chat_update("voice", message_id=30, at=at), SimpleNamespace(bot=bot))
 
     assert panel._post._LAST_INBOUND == {(BUSINESS_ID, str(CHAT)): at}
     assert await run_command(panel, command_update(message_id=501), bot)

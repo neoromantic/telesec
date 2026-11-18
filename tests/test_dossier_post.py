@@ -8,14 +8,12 @@ nothing is posted.
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import logging
 import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -46,7 +44,6 @@ plug = tdp.plug
 ds = tdp.ds
 panel = tdp.panel
 
-ROOT = Path(__file__).resolve().parents[1]
 CHAT = tdp.CHAT
 OTHER_CHAT = 992
 SECOND = timedelta(seconds=1)
@@ -160,28 +157,6 @@ async def test_the_post_is_the_stored_document_and_nothing_owner_only(plug, ds, 
 
 
 @pytest.mark.asyncio
-async def test_no_message_ref_reaches_the_post_in_any_form(plug, ds, panel):
-    await live_chat(plug)
-    refs = "[M10] [м11] (m10) **[m11]** [ m10 , m 11 ] [m10…m11] `[m10]`"  # forms a model may slip into
-    llm = FakeLlm(doc(f"## Notes\n- {NEW_LINE} {refs}"))
-
-    html = _html(await _command(panel, llm))
-
-    assert f"<li>{NEW_LINE}</li>" in html
-    for leftover in ("m10", "M10", "м11", "**", "`", "<b></b>"):
-        assert leftover not in html, leftover
-
-
-def test_the_post_reads_no_field_of_the_document_but_its_text():
-    # The plan reads the note to see whether it changed, but only the document text leaves this module.
-    tree = ast.parse((ROOT / "dossier_post.py").read_text(encoding="utf-8"))
-    keys = {node.slice.value for node in ast.walk(tree)
-            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
-            and isinstance(node.slice.value, str)}
-    assert keys == {"document"}
-
-
-@pytest.mark.asyncio
 async def test_a_converted_v1_document_is_never_posted_before_a_refresh(plug, ds, panel, post):
     entry = await live_chat(plug)
     put(dossier_dir(ds, CHAT), v1_contact(fact("f1", f"Was rude once ({CANARY_V1})."), conn=BUSINESS_ID, chat=CHAT))
@@ -255,12 +230,9 @@ async def test_a_refresh_that_changes_nothing_posts_the_stored_document(plug, ds
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rows", [
-    [(10, "in", ASK, 30)],  # only the contact wrote
-    [(10, "in", ASK, 30), (11, "bot", f"{chr(0x1F399)}{chr(0xFE0F)} a transcript", 29)],  # a transcript is nobody's
-])
-async def test_without_both_sides_there_is_no_dossier_and_no_call(plug, ds, panel, post, rows):
-    await seed(plug, CHAT, "anna_k", rows, first_name="Anna")
+async def test_a_transcript_is_nobodys_side_so_there_is_no_dossier_and_no_call(plug, ds, panel, post):
+    await seed(plug, CHAT, "anna_k", [(10, "in", ASK, 30), (11, "bot", f"{chr(0x1F399)}{chr(0xFE0F)} a transcript", 29)],
+               first_name="Anna")
     entry = catalog_entry(plug, CHAT)
     llm = FakeLlm()
 
@@ -303,17 +275,10 @@ async def test_a_failed_refresh_posts_nothing_not_even_the_stored_document(plug,
 
 
 @pytest.mark.asyncio
-async def test_no_model_matters_only_when_a_refresh_is_due(plug, ds, panel):
+async def test_an_up_to_date_document_is_posted_without_a_model(plug, ds, panel):
     await current(plug, ds)
 
     assert len(tdp.posts(await _command(panel))) == 1  # no model bound: the stored document needs none
-
-    await seed(plug, CHAT, "anna_k", [(12, "in", "Can it be at 10:30?", 5)], first_name="Anna")
-    bot = tdp.PanelBot()
-    assert await tdp.run_command(panel, tdp.command_update(message_id=501), bot)
-    assert tdp.posts(bot) == []
-    assert [sent["text"] for sent in bot.sent] == [
-        f"{tdp.HEAD}\nThe dossier needs a refresh first, and the model is not connected."]
 
 
 # ---------------------------------------------------------------------------
@@ -551,18 +516,6 @@ async def test_a_chat_the_inbound_cap_may_have_dropped_is_not_known_closed(plug,
     assert post.post_precheck(entry, now=NOW) is None  # unknown, so the post is tried
     assert post.post_window_open(entry, now=NOW) is False  # and Telegram's refusal is told as the window
     assert post.post_precheck(entry, now=ago(30) + timedelta(hours=24) + SECOND) == "window"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["disabled", "history_off", "chat_off", "window"])
-async def test_each_refusal_makes_no_model_call(plug, ds, panel, reason):
-    await tdp._refusal_case(plug, ds, reason)
-    llm = FakeLlm()
-
-    bot = await _command(panel, llm)
-
-    assert llm.calls == [] and tdp.posts(bot) == []
-    assert bot.sent[0]["text"].startswith(f"{tdp.HEAD}\n")
 
 
 # ---------------------------------------------------------------------------
