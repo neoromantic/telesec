@@ -673,7 +673,7 @@ Tests cover the history CLI and disk recovery, transcript behavior, and real PTB
 
 ```bash
 uv sync
-uv run pytest -q
+uv run --with pytest-xdist pytest -q -n auto
 ```
 
 Live Telegram client rendering and provider cleanup quality require a separate configured smoke test. The [verification guide](docs/VERIFY.md) records the boundary.

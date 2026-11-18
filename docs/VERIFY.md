@@ -4,11 +4,11 @@
 
 ```bash
 uv sync
-uv run pytest -q
+uv run --with pytest-xdist pytest -q -n auto
 uv run ruff check .
 ```
 
-CI runs the suite on Python 3.11–3.14. Telegram, STT, and LLM network calls are simulated. Real PTB objects and request serialization are exercised separately from the lightweight unit fixtures.
+CI runs the suite on Python 3.14, the version Hermes installs. Telegram, STT, and LLM network calls are simulated. Real PTB objects and request serialization are exercised separately from the lightweight unit fixtures.
 
 History checks must cover one-time opt-in, private-chat defaults, the stored old scope rule (per connection and chat, fail closed until stored, variables still set applying with it, empty variables as unset, an owner's explicit on, a repair keeping it, `chat scope clear`), create/edit/delete capture, correction classification, restart/retry behavior, partial final writes, contact renames and ambiguity, bounded date/text queries, retention, catalog rebuilds, and CLI failure exits.
 

@@ -1,5 +1,5 @@
-# Based on devkit's templates/ci.python.yml, with a Python version matrix:
-# Telesec runs inside whatever Python the Hermes gateway uses, 3.11 to 3.14.
+# Based on devkit's templates/ci.python.yml. Tests run in parallel (pytest-xdist) on the
+# Python from .python-version, the one Hermes installs; ruff's py311 target guards the floor.
 # Edited here on purpose, so devkit sync leaves this file alone.
 name: ci
 
@@ -23,7 +23,8 @@ jobs:
     permissions:
       contents: read
     with:
-      python-version: '["3.11","3.12","3.13","3.14"]'
+      test-with: pytest-xdist
+      test-command: pytest -q -n auto
 
   hygiene:
     uses: neoromantic/devkit/.github/workflows/hygiene.yml@v1
