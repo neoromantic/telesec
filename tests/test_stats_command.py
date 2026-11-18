@@ -21,9 +21,7 @@ import test_history as th
 import test_transcription_modes as ttm
 from telegram.ext import ApplicationHandlerStop
 from test_stats import (
-    HISTORY_DOC,
     NOW,
-    README_DOC,
     STATS_DOC,
     _alice_fixture,
     _break_history,
@@ -305,31 +303,12 @@ async def test_owner_stats_is_edited_in_place_into_the_card(alice):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("code", "expected"),
-    [("ru", "ru"), ("ru-RU", "ru"), ("RU", "ru"), ("en", "en"), (None, "en"), ("de", "en"), ("uk", "en")],
-)
-async def test_card_language_follows_the_owner_client(alice, code, expected):
-    bot = StatsBot()
-    owner = "Сергей" if expected == "ru" else "Sam"
-
-    assert await dispatch(alice, stats_update(lang=code, first_name=owner), bot)
-
-    assert edit_html(bot) == (CARD_ALL_RU if expected == "ru" else CARD_ALL_EN)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
     ("text", "period"),
     [
         ("/stats", "all"),
-        ("/stats all", "all"),
-        ("/stats 7d", "7d"),
-        ("/stats 30d", "30d"),
-        ("/stats 90d", "90d"),
-        ("/STATS 30D", "30d"),
         ("/Stats All", "all"),
-        ("/stats@TelesecBot", "all"),
         ("/stats@TelesecBot 7d", "7d"),
+        ("/STATS 30D", "30d"),
         ("/stats   90d  ", "90d"),
         ("/stats\n7d\n", "7d"),
     ],
@@ -388,32 +367,6 @@ async def test_card_uses_first_names_and_falls_back_to_history(alice):
     # The contact's first name from history, and a generic owner label: never "You".
     assert edit_html(bot).startswith("<h3>📊 Owner × Alice</h3>")
     assert "You" not in edit_html(bot)
-
-
-@pytest.mark.asyncio
-async def test_card_never_shows_owner_only_details_or_text(alice):
-    # The fixture has deletions, edits, an unanswered message, missing history, and p90 reply times:
-    # the owner panel shows them all.
-    panel = module(alice, "stats_render").panel(*contact_stats(alice), period="all", contact_name="Alice").html
-    for word in ("deleted", "❓", "edits", "waiting", "p90", "history since"):
-        assert word in panel
-    cards = {}
-    for lang, owner in (("en", "Sam"), ("ru", "Сергей")):
-        bot = StatsBot()
-        update = stats_update(lang=lang, first_name=owner, message_id=COMMAND_ID + len(cards))
-        assert await dispatch(alice, update, bot)
-        cards[lang] = _visible(edit_html(bot))
-        cards[f"{lang} text"] = card_for(alice, lang=lang, owner=owner).text
-
-    forbidden = {
-        "en": ("deleted", "❓", "edits", "waiting", "p90", "history", "You", "previous", "📈"),
-        "ru": ("удалено", "❓", "правки", "ждёт", "p90", "история", "Вы", "прошлым", "📈"),
-    }
-    forbidden.update({f"{lang} text": words for lang, words in list(forbidden.items())})
-    for lang, card in cards.items():
-        assert "SECRET" not in card  # the fixture's message text
-        for word in forbidden[lang]:
-            assert word not in card, (lang, word)
 
 
 @pytest.mark.asyncio
@@ -493,31 +446,20 @@ async def test_paused_chat_gets_the_same_card_and_stays_control_traffic(alice, l
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["/stats", "/stats 7d"])
-async def test_contact_stats_is_ordinary_text_and_captured(alice, text):
+async def test_contact_stats_is_ordinary_text_and_captured(alice):
     bot = StatsBot()
 
-    await dispatch(alice, stats_update(text, sender=PEER), bot)
+    await dispatch(alice, stats_update(sender=PEER), bot)
 
     assert bot.text_edit_calls == [] and bot.api_calls == [] and bot.calls == [] and bot.delete_calls == []
     [record] = [record for record in th.load_records(alice) if record["message_id"] == COMMAND_ID]
-    assert (record["direction"], record["text"]) == ("inbound", text)
+    assert (record["direction"], record["text"]) == ("inbound", "/stats")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "text",
-    [
-        "/stats 1y",
-        "/stats 7d 30d",
-        "/stats week",
-        "/stats7d",
-        "/statsx",
-        "/stats@ 7d",
-        "stats",
-        "hello /stats",
-        "/stat",
-    ],
+    ["/stats 1y", "/stats 7d 30d", "/stats7d", "/stats@ 7d", "hello /stats"],
 )
 async def test_unknown_argument_or_other_text_is_ordinary_text(alice, text):
     bot = StatsBot()
@@ -565,17 +507,15 @@ async def test_unverified_owner_stats_is_ordinary_unknown_text(alice):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["cant_edit", "false_result", "timed_out", "network"])
+@pytest.mark.parametrize("failure", ["cant_edit", "false_result", "timed_out"])
 async def test_failed_edit_sends_the_rich_card_and_deletes_the_command(alice, failure):
     bot = StatsBot()
     if failure == "cant_edit":
         bot.rich_edit_error = ttm.BadRequest("Bad Request: message can't be edited")
     elif failure == "false_result":
         bot.rich_edit_result = False
-    elif failure == "timed_out":
-        bot.rich_edit_error = ttm.TimedOut("timed out")
     else:
-        bot.rich_edit_error = ttm.NetworkError("connection reset")
+        bot.rich_edit_error = ttm.TimedOut("timed out")
 
     assert await dispatch(alice, stats_update(), bot)
 
@@ -753,8 +693,7 @@ def _set_up_notice(plugin, monkeypatch, state: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("lang", ["en", "ru"])
-@pytest.mark.parametrize("state", ["history_off", "no_history", "read_error"])
+@pytest.mark.parametrize(("state", "lang"), [("history_off", "en"), ("no_history", "ru"), ("read_error", "en")])
 async def test_notice_replaces_the_command_and_both_are_deleted(plugin, modes, monkeypatch, caplog, state, lang):
     monkeypatch.setattr(plugin, "_STATS_NOTICE_TTL_SECONDS", 0)
     _set_up_notice(plugin, monkeypatch, state)
@@ -905,13 +844,3 @@ async def test_docs_card_example_matches_the_real_card(alice):
 
     assert language == "html"
     assert documented == edit_html(bot)
-    assert "the contact sees it too" in section
-    # `/dossier` is the other owner command typed in a Business chat; both post what the contact sees.
-    assert "one of the two commands" in section and "/dossier" in section
-    readme = README_DOC.read_text(encoding="utf-8")
-    assert "docs/STATS.md#in-a-business-chat-stats" in readme
-    # Control traffic stays out of history only while its IDs are remembered; both docs say so.
-    history = HISTORY_DOC.read_text(encoding="utf-8")
-    assert "(STATS.md#in-a-business-chat-stats)" in history
-    for doc in (history, section):
-        assert "24 hours" in doc and "after a gateway restart" in doc

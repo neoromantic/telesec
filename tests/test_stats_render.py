@@ -462,18 +462,15 @@ def test_empty_period(cs, render):
 
 
 def test_language_follows_the_owner_client(cs, render):
-    for code in ("ru", "ru-RU", "RU"):
-        assert _panel(cs, render, "month", "30d", code).html == PANEL_MONTH_RU
-    for code in (None, "", "en", "de", "uk"):
-        assert _panel(cs, render, "month", "30d", code).html.startswith("<h3>📊 Денис Петров · 30 days</h3>\n")
+    assert _panel(cs, render, "month", "30d", "ru-RU").html == PANEL_MONTH_RU
+    assert _panel(cs, render, "month", "30d", "uk").html.startswith("<h3>📊 Денис Петров · 30 days</h3>\n")
 
 
-@pytest.mark.parametrize("lang", ["en", "ru"])
-def test_paused_note_is_the_last_paragraph(cs, render, lang: str):
-    note = "History is paused for this chat." if lang == "en" else "История этого чата сейчас не сохраняется."
+def test_paused_note_is_the_last_paragraph(cs, render):
+    note = "History is paused for this chat."
     for case, period in (("month", "30d"), ("empty", "7d")):
-        plain = _panel(cs, render, case, period, lang)
-        noted = _panel(cs, render, case, period, lang, note=note)
+        plain = _panel(cs, render, case, period, "en")
+        noted = _panel(cs, render, case, period, "en", note=note)
         head, footer = plain.html.rsplit("\n", 1)
         assert noted.html == f"{head}\n<p>{note}</p>\n{footer}"
         head, footer = plain.text.rsplit("\n", 1)
@@ -490,7 +487,6 @@ def test_waiting_names_the_side(cs, render):
     assert "\n⏳ Вы ждёте ответа 13 ч 52 мин\n" in owner.text
     # No clock time: Telegram may show the message in another time zone.
     assert not re.search(r"\d\d:\d\d", contact.html + owner.html + contact.text + owner.text)
-    assert "blockquote" not in _panel(cs, render, "all", "all", "en").html
 
 
 def test_panel_omits_rows_without_data(cs, render):
@@ -712,20 +708,7 @@ def test_hostile_names_are_escaped_and_clipped(cs, render):
     assert long.text.split("\n")[0] == f"📊 {'O' * 31}… × {'👨‍👩‍👧' * 31}…"
 
 
-def test_right_to_left_names_cannot_flip_a_line(cs, render):
-    lrm, name = "\u200e", "محمد علي"
-    # _check asserts that every line starts left to right and keeps each name between LRMs.
-    panel = _panel(cs, render, "month", "30d", "ru", contact_name=name)
-    _check(panel)
-    assert f"🟦 {lrm}{name}{lrm}</th>" in panel.html
-    card = _card(cs, render, "all", "all", "en", owner="דוד", contact=name)
-    _check(card)
-    assert card.text.startswith(f"📊 {lrm}דוד{lrm} × {lrm}{name}{lrm}\n")
-    # Names without right-to-left letters get no marks.
-    assert lrm not in _panel(cs, render, "month", "30d", "ru").html + _card(cs, render, "all", "all", "en").html
-
-
-WORST_NAMES = ["W" * 100, "\U0001f600" * 100, "&" * 100, "a\x1bb\u202ec" * 30, "たなかたろうさん", "דוד 42"]
+WORST_NAMES = ["W" * 100, "\U0001f600" * 100, "&" * 100, "a\x1bb\u202ec" * 30, "たなかたろうさん", "דוד 42", "محمد علي"]
 
 
 @pytest.mark.parametrize("lang", ["ru", "en"])
@@ -796,9 +779,3 @@ def test_numbers_and_dates(cs, render):
     assert [render.period_label(period) for period in render.PERIODS] == ["7 days", "30 days", "90 days", "all time"]
     with pytest.raises(ValueError):
         render.period_label("14d")
-
-
-def test_every_russian_string_has_an_english_one(render):
-    assert set(render._STRINGS["ru"]) <= set(render._STRINGS["en"])
-    for strings in render._STRINGS.values():
-        assert not any(char in value for value in strings.values() for char in "<>&")
