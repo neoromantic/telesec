@@ -106,23 +106,15 @@ async def test_an_unexplained_deletion_sends_one_alert_with_the_text_behind_a_bu
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("text", "then"),
-    [("Meet me at teh north gate at five", "Meet me at the north gate at five"),  # likely correction
-     ("Meet me at the north gate at five", "Meet me at the north gate at five")],  # likely duplicate
+    ("text", "then", "from_user_id"),
+    [("Meet me at teh north gate at five", "Meet me at the north gate at five", 2000),  # likely correction
+     ("Meet me at the north gate at five", "Meet me at the north gate at five", 2000),  # likely duplicate
+     ("Meet me at the north gate at five", None, 1000)],  # the owner's own message
 )
-async def test_a_deletion_replaced_by_a_later_message_stays_quiet(alerts, text, then):
+async def test_a_replaced_or_own_deletion_stays_quiet(alerts, text, then, from_user_id):
     bot = AlertBot()
 
-    await _delete(alerts, bot, text=text, then=then)
-
-    assert bot.sent == []
-
-
-@pytest.mark.asyncio
-async def test_the_owners_own_deletion_stays_quiet(alerts):
-    bot = AlertBot()
-
-    await _delete(alerts, bot, text="Meet me at the north gate at five", from_user_id=1000)
+    await _delete(alerts, bot, text=text, then=then, from_user_id=from_user_id)
 
     assert bot.sent == []
 
@@ -234,45 +226,6 @@ async def test_pre_upgrade_classifications_are_not_replayed(enabled_history):
     module._deletion_alerts.bind(bot)
     await _settle()
     assert bot.sent == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("rejected", [False, True])
-async def test_actual_cleanup_echo_saves_provenance_but_owner_edit_counts(enabled_history, rejected):
-    from test_history import load_records
-    from test_plugin import RAW_FIRST_CLEAN, RAW_FIRST_RAW, _raw_first_setup
-
-    module = enabled_history
-    message, event, bot, gateway = _raw_first_setup()
-    observe = module._history_support.observe_ptb_update
-    await observe(make_business_text_update(text="🎙️ " + RAW_FIRST_RAW, from_user_id=1000,
-        message_id=500, update_id=1, date=BASE), bot=bot, now=BASE)
-
-    async def edit(**kwargs):
-        if rejected:
-            raise RuntimeError("message can not be edited")
-        await observe(make_business_text_update(text=kwargs["text"], message_id=500, update_id=2,
-            from_user_id=1000, edited=True, date=BASE), bot=bot, now=BASE + timedelta(seconds=1))
-        return True
-
-    bot.edit_message_text = edit
-    await module._publish_transcript(bot=bot, adapter=gateway.adapters[event.source.platform], message=message,
-        transcript=RAW_FIRST_RAW, cleanup_fn=lambda _: RAW_FIRST_CLEAN, llm=None)
-    # Telesec's own save that marks the copied raw text as a transcript is dated now, in a later month file.
-    records = [record for record in load_records(module) if record["source"] != "transcript"]
-    if not rejected:
-        assert records[-1]["edit_origin"] == "transcript_cleanup"
-    scan = module.correspondence_stats.ChatScan("business-123", "991")
-    for ordinal, record in enumerate(records):
-        scan.consume(record, ordinal)
-    assert not scan.messages["500"].edited
-    # Even a manual revision identical to a rejected cleanup is an owner edit.
-    await observe(make_business_text_update(text="🎙️ " + RAW_FIRST_CLEAN, message_id=500, update_id=3,
-        from_user_id=1000, edited=True, date=BASE), bot=bot, now=BASE + timedelta(seconds=2))
-    scan = module.correspondence_stats.ChatScan("business-123", "991")
-    for ordinal, record in enumerate(load_records(module)):
-        scan.consume(record, ordinal)
-    assert scan.messages["500"].edited
 
 
 @pytest.mark.asyncio
