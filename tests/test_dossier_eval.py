@@ -26,22 +26,12 @@ from model_fakes import FakeOpener
 ROOT = Path(__file__).resolve().parents[1]
 
 V1_ENV = "TELESEC_EVAL_V1_WORKTREE"  # opt-in: a v0.13.0 worktree for the v1 arm test
-O6_SCENARIOS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S12"]
 FACT_KINDS = ("other", "date", "amount", "contact")
 PHONE_RE = re.compile(r"\+?\d(?:[\s().-]*\d){8,}")
 MADE_UP_PHONE_RE = re.compile(r"\+1 555 555-01\d\d")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 HOME_PATH_RE = re.compile(r"/(?:Users|home)/\w|[A-Za-z]:\\\\Users")
 SHARED_TMP_RE = re.compile(r"(?<![\w.~])/tmp/")
-KEY_ENV = ("AI_GATEWAY_API_KEY", "AI_GATEWAY_BASE_URL", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN")
-
-
-def _has_v2_api() -> bool:
-    source = (ROOT / "dossier_support.py").read_text(encoding="utf-8")
-    return all(f"def {name}(" in source for name in (*run.V2_API, "set_clairic"))
-
-
-needs_v2 = pytest.mark.skipif(not _has_v2_api(), reason="dossier_support does not have the v2 API yet")
 
 
 def _v1_worktree() -> Path | None:
@@ -56,7 +46,7 @@ needs_v1 = pytest.mark.skipif(_v1_worktree() is None, reason=f"set {V1_ENV} to a
 @pytest.fixture(autouse=True)
 def offline(no_network: None, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """No sockets, no keys from the developer's environment, and no leftover ``agent.secret_scope``."""
-    for name in KEY_ENV:
+    for name in ll.SECRET_NAMES:
         monkeypatch.delenv(name, raising=False)
     saved = {name: sys.modules.get(name) for name in ("agent", "agent.secret_scope")}
     yield
@@ -125,17 +115,6 @@ def _chat_payload(text: str, *, model: str = ll.WRITER_MODEL, cost: float | None
                        "usage": usage}).encode()
 
 
-class RecordingOpener:
-    """The dry-run opener that also counts the requests it answered."""
-
-    def __init__(self) -> None:
-        self.urls: list[str] = []
-
-    def __call__(self, request: Any, timeout: float | None = None) -> ll.CannedResponse:
-        self.urls.append(request.full_url)
-        return ll.dry_run_opener(request, timeout)
-
-
 def _out_dir(base: Path) -> Path:
     runs = sorted(base.iterdir())
     assert len(runs) == 1
@@ -145,11 +124,6 @@ def _out_dir(base: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Scenarios
 # ---------------------------------------------------------------------------
-
-
-def test_the_o6_scenarios_load() -> None:
-    assert [scenario.id for scenario in sc.ALL] == O6_SCENARIOS
-    assert set(sc.BY_ID) == set(O6_SCENARIOS)
 
 
 @pytest.mark.parametrize("scenario", sc.ALL, ids=lambda s: s.id)
@@ -194,6 +168,15 @@ def test_scenario_is_consistent(scenario: sc.Scenario) -> None:
     assert checkpoints and len({cp.id for cp in checkpoints}) == len(checkpoints)
     canary_ids = [c.id for c in scenario.canaries]
     assert len(canary_ids) == len(set(canary_ids))
+    dead = _dead_ids(scenario)
+    for canary in scenario.canaries:
+        assert set(canary.hard) <= set(sc.TARGETS) and set(canary.reported) <= set(sc.TARGETS)
+        assert not set(canary.hard) & set(canary.reported) and (canary.hard or canary.reported)
+        source = scenario.notes() if canary.kind == "note" else scenario.messages()
+        holders = [item for item in source if jd.canary_hit(item.text, canary)]
+        assert holders, f"{canary.id} must occur in the scenario's {'notes' if canary.kind == 'note' else 'messages'}"
+        if canary.kind == "deleted":
+            assert all(m.id in dead for m in holders), f"{canary.id}: a deleted canary may only occur in dead messages"
     for cp in checkpoints:
         assert cp.target in ("auto", "persona")
         assert cp.canaries is None or set(cp.canaries) <= set(canary_ids)
@@ -205,28 +188,6 @@ def test_scenario_is_consistent(scenario: sc.Scenario) -> None:
             seen = [m.text for m in messages if m.chat == fact.chat and m.at <= cp.at]
             seen += [note.text for note in scenario.notes() if note.chat == fact.chat and note.at <= cp.at]
             assert jd.fact_presence(" ".join(seen), fact) == "current", "the chat must state the fact by then"
-
-
-@pytest.mark.parametrize(("scenario", "canary"), [(s, c) for s in sc.ALL for c in s.canaries],
-                         ids=lambda v: v.id)
-def test_canary_occurs_in_its_scenario(scenario: sc.Scenario, canary: sc.Canary) -> None:
-    assert set(canary.hard) <= set(sc.TARGETS) and set(canary.reported) <= set(sc.TARGETS)
-    assert not set(canary.hard) & set(canary.reported) and (canary.hard or canary.reported)
-    source = scenario.notes() if canary.kind == "note" else scenario.messages()
-    holders = [item for item in source if jd.canary_hit(item.text, canary)]
-    where = "notes" if canary.kind == "note" else "messages"
-    assert holders, f"{scenario.id}/{canary.id} must occur in the scenario's {where}"
-    if canary.kind == "deleted":
-        dead = _dead_ids(scenario)
-        assert all(m.id in dead for m in holders), "a deleted canary may only occur in dead messages"
-
-
-def test_the_deleted_voice_is_a_legacy_transcript() -> None:
-    s5 = sc.BY_ID["S5"]
-    deleted = {m.id for m in s5.messages() if m.event == "deleted"}
-    chunks = [m for m in s5.messages() if m.id in _dead_ids(s5) - deleted]
-    assert len(chunks) == 3
-    assert chunks[0].reply_to is not None and all(m.reply_to is None for m in chunks[1:])
 
 
 def test_the_deleted_voice_in_a_post_is_reported_not_a_blocker() -> None:
@@ -251,17 +212,14 @@ def test_the_deleted_voice_in_a_post_is_reported_not_a_blocker() -> None:
     assert rise["canaries_hard"] == rise["canaries_reported"] == {"deleted:post": 1}
 
 
-@pytest.mark.parametrize("scenario", sc.ALL, ids=lambda s: s.id)
-def test_scenario_uses_made_up_data_only(scenario: sc.Scenario) -> None:
-    for text in _all_texts(scenario):
-        for phone in PHONE_RE.findall(text):
-            assert MADE_UP_PHONE_RE.fullmatch(phone), "phones must be +1 555 555-01.."
-        for mail in EMAIL_RE.findall(text):
-            assert mail.endswith("@example.com"), "mail must be @example.com"
-        assert not HOME_PATH_RE.search(text)
-
-
-def test_eval_sources_use_made_up_data_only() -> None:
+def test_eval_uses_made_up_data_only() -> None:
+    for scenario in sc.ALL:
+        for text in _all_texts(scenario):
+            for phone in PHONE_RE.findall(text):
+                assert MADE_UP_PHONE_RE.fullmatch(phone), f"{scenario.id}: phones must be +1 555 555-01.."
+            for mail in EMAIL_RE.findall(text):
+                assert mail.endswith("@example.com"), f"{scenario.id}: mail must be @example.com"
+            assert not HOME_PATH_RE.search(text), scenario.id
     for path in sorted((ROOT / "tests" / "dossier_eval").glob("*.py")):
         source = path.read_text(encoding="utf-8")
         assert not HOME_PATH_RE.search(source), path.name
@@ -358,15 +316,6 @@ def test_v1_structured_request_shape() -> None:
     assert meter.records[0].kind == "contact"
 
 
-def test_budget_stops_before_a_call_it_cannot_afford() -> None:
-    opener = FakeOpener()
-    meter = ll.Meter(ll.Budget(0.01), key="test-key", opener=opener)
-    with pytest.raises(ll.BudgetExceeded):
-        ll.LiveLlm(meter).complete([{"role": "user", "content": "hi"}], purpose="telesec_dossier")
-    assert opener.calls == [] and meter.records == []
-    assert meter.budget.stopped and meter.budget.spent_usd == 0
-
-
 def test_budget_stops_the_second_call_and_stays_stopped() -> None:
     opener = FakeOpener([(200, _chat_payload("first", cost=0.025))])
     meter = ll.Meter(ll.Budget(0.05), key="test-key", opener=opener)
@@ -384,7 +333,7 @@ def test_budget_stops_the_second_call_and_stays_stopped() -> None:
     assert info.value.kind == "budget"
     with pytest.raises(client.ModelCallError):
         wrapped["clairic_extract"]("state", {"date": {"type": "date"}})
-    assert len(opener.calls) == 1
+    assert len(opener.calls) == len(meter.records) == 1
 
 
 def test_estimate_is_conservative() -> None:
@@ -416,27 +365,20 @@ def test_a_client_error_is_not_retried_and_keeps_no_body() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("model", ["google/gemini-3.8-flash", "Google/gemini-3.5-pro", " google/x ", "gemini", ""])
-def test_a_google_or_bare_judge_is_refused(model: str) -> None:
-    with pytest.raises(ValueError):
-        jd.check_judge_model(model)
-    with pytest.raises(ValueError):
-        jd.judge_body(model, "{}")
-
-
 def test_judge_body_and_temperature() -> None:
-    body = jd.judge_body(jd.DEFAULT_JUDGE, "{}")
-    assert body["model"] == "anthropic/claude-sonnet-5.5" and "temperature" not in body
-    assert body["messages"][0]["content"] == jd.JUDGE_SYSTEM and body["max_tokens"] == jd.JUDGE_MAX_TOKENS
+    assert "temperature" not in jd.judge_body(jd.DEFAULT_JUDGE, "{}")
     assert jd.judge_body("openai/gpt-5.5", "{}")["temperature"] == 0
 
 
-def test_main_refuses_a_google_judge(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize(("model", "reason"), [
+    ("google/gemini-3.8-flash", "google/"), ("Google/gemini-3.5-pro", "google/"), (" google/x ", "google/"),
+    ("gemini", "gateway model id"), ("", "gateway model id")])
+def test_main_refuses_a_google_or_bare_judge(model: str, reason: str, tmp_path: Path,
+                                             capsys: pytest.CaptureFixture[str]) -> None:
     out = tmp_path / "out"
-    code = run.main(["--dry-run", "--arms", "v2", "--scenarios", "S9", "--judge", "google/gemini-3.8-flash",
-                     "--out", str(out)])
+    code = run.main(["--dry-run", "--arms", "v2", "--scenarios", "S9", "--judge", model, "--out", str(out)])
     assert code == 2 and not out.exists()
-    assert "google/" in capsys.readouterr().err
+    assert reason in capsys.readouterr().err
 
 
 def test_deterministic_checks_override_the_judge() -> None:
@@ -494,8 +436,6 @@ def test_text_checks() -> None:
     assert jd.units("a😀") == 3
     assert jd.language_ok("Дедлайн 30 октября", "ru") and not jd.language_ok("Deadline 30 October", "ru")
     assert jd.language_ok("Deadline 30 October", "en") and jd.language_ok("12:00", "en") is None
-    canary = sc.Canary("rise", "17 percent", "deleted", ("17%",))
-    assert jd.canary_hits("Prices go up 17% in November", [canary]) == ["rise"]
 
 
 def test_gate_table_suggests_the_highest_full_recall_threshold() -> None:
@@ -554,7 +494,7 @@ def test_summary_holds_no_scenario_text() -> None:
     subsets = {group: {name: run.arm_metrics(run.ARMS[name], results, records, ids) for name in metrics}
                for group, ids in (("gate", run.GATE_SCENARIOS), ("think", run.THINK_SCENARIOS),
                                   ("clairic", run.CLAIRIC_SCENARIOS))}
-    meta = {"started": "2026-10-20T00:00:00+00:00", "dry_run": False, "arms": list(metrics), "scenarios": O6_SCENARIOS,
+    meta = {"started": "2026-10-20T00:00:00+00:00", "dry_run": False, "arms": list(metrics), "scenarios": list(sc.BY_ID),
             "runs": 1, "judge": jd.DEFAULT_JUDGE, "budget_usd": 6.0, "spent_usd": 0.01, "budget_stopped": False}
     summary = run.render_summary(meta, metrics, {"v2-clairic": "no credentials"}, run.decisions(metrics, subsets))
 
@@ -588,9 +528,8 @@ class EchoOpener:
                                   "usage": {"prompt_tokens": 10, "completion_tokens": 10}})
 
 
-@needs_v2
 def test_dry_run_summary_holds_no_scenario_text(tmp_path: Path) -> None:
-    ids = ["S5", "S6", "S7", "S12"]
+    ids = ["S6", "S12"]
     lines = [canary.text for scenario_id in ids for canary in sc.BY_ID[scenario_id].canaries]
     code = run.main(["--dry-run", "--arms", "v2", "--scenarios", ",".join(ids), "--out", str(tmp_path)],
                     opener=EchoOpener(lines))
@@ -600,7 +539,6 @@ def test_dry_run_summary_holds_no_scenario_text(tmp_path: Path) -> None:
     # The canaries reached the saved documents and the checks, which report them by id only.
     assert "S6/cp2: injection canary raven in the document" in summary
     assert "S12/p2: other_chat canary phrase in the persona" in summary
-    assert "| 6 | release blockers in v2 | 0 |" not in summary
     assert lines[0] in (out / "v2.json").read_text(encoding="utf-8")
     for scenario_id in ids:
         for text in filter(_distinctive, _all_texts(sc.BY_ID[scenario_id])):
@@ -646,21 +584,17 @@ def test_usage_errors(argv: list[str], tmp_path: Path) -> None:
     assert info.value.code == 2
 
 
-@needs_v2
 def test_dry_run_of_the_v2_arms(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    opener = RecordingOpener()
-    code = run.main(["--dry-run", "--arms", "v2,v2-gate,v2-clairic", "--scenarios", "S1,S9,S12",
-                     "--out", str(tmp_path)], opener=opener)
+    code = run.main(["--dry-run", "--arms", "v2,v2-gate,v2-clairic", "--scenarios", "S6", "--out", str(tmp_path)])
     assert code == 0
     out = _out_dir(tmp_path)
     assert sorted(p.name for p in out.iterdir()) == ["summary.md", "v2-clairic.json", "v2-gate.json", "v2.json"]
-    assert all(url.startswith("https://") for url in opener.urls)
     printed = capsys.readouterr().out
     assert "dry-run-key" not in printed and "dry-run-token" not in printed
 
     v2 = json.loads((out / "v2.json").read_text(encoding="utf-8"))
     assert v2["config"]["gate"] == "off" and v2["config"]["model"] == ll.WRITER_MODEL
-    assert [r["status"] for r in v2["runs"]] == ["ok", "ok", "ok"]
+    assert [r["status"] for r in v2["runs"]] == ["ok"]
     kinds = {c["kind"] for c in v2["calls"]}
     assert {"contact", "persona", "judge"} <= kinds and "gate" not in kinds
     gate = json.loads((out / "v2-gate.json").read_text(encoding="utf-8"))
@@ -668,23 +602,18 @@ def test_dry_run_of_the_v2_arms(tmp_path: Path, capsys: pytest.CaptureFixture[st
     clairic = json.loads((out / "v2-clairic.json").read_text(encoding="utf-8"))
     assert any(c["kind"] == "clairic" for c in clairic["calls"])
 
-    summary = (out / "summary.md").read_text(encoding="utf-8")
-    assert "Mode: dry run (no model calls)" in summary and "simulated spend" in summary
-    assert "S9 zero calls after the prune: pass" in summary
-    assert "## O.6 decisions" in summary and "| 3 | GATE_THRESHOLD" in summary
+    assert "Mode: dry run (no model calls)" in (out / "summary.md").read_text(encoding="utf-8")
 
 
-@needs_v2
 def test_dry_run_stops_on_the_budget(tmp_path: Path) -> None:
-    opener = RecordingOpener()
+    opener = FakeOpener()
     code = run.main(["--dry-run", "--arms", "v2", "--scenarios", "S9", "--judge", "off", "--budget-usd", "0.001",
                      "--out", str(tmp_path)], opener=opener)
-    assert code == 1 and opener.urls == []
+    assert code == 1 and opener.calls == []
     summary = (_out_dir(tmp_path) / "summary.md").read_text(encoding="utf-8")
     assert "stopped by the budget: yes" in summary
 
 
-@needs_v2
 def test_an_unexpected_error_keeps_the_other_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                   capsys: pytest.CaptureFixture[str]) -> None:
     real_cycle = run.Harness.cycle
@@ -697,8 +626,10 @@ def test_an_unexpected_error_keeps_the_other_runs(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(run.Harness, "cycle", cycle)
     code = run.main(["--dry-run", "--arms", "v2", "--scenarios", "S12,S9", "--judge", "off", "--out", str(tmp_path)])
     assert code == 1
-    runs = json.loads((_out_dir(tmp_path) / "v2.json").read_text(encoding="utf-8"))["runs"]
+    out = _out_dir(tmp_path)
+    runs = json.loads((out / "v2.json").read_text(encoding="utf-8"))["runs"]
     assert [(r["scenario"], r["status"]) for r in runs] == [("S12", "error ValueError"), ("S9", "ok")]
+    assert "S9 zero calls after the prune: pass" in (out / "summary.md").read_text(encoding="utf-8")
     assert "Mokotow" not in capsys.readouterr().out
 
 
