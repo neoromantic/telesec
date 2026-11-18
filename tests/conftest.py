@@ -1,8 +1,9 @@
 """Shared fixtures for the dossier tests.
 
-Plain helpers live in ``dossier_helpers.py``. Nothing here is autouse and no fixture
-reuses a name from an existing test module, so existing tests resolve exactly the
-fixtures they did before.
+Plain helpers live in ``dossier_helpers.py``. No fixture reuses a name from an existing
+test module, so existing tests resolve exactly the fixtures they did before. The one
+autouse fixture forgets the plugin copies a test loaded, so the suite does not keep
+thousands of them in memory.
 """
 
 from __future__ import annotations
@@ -133,3 +134,12 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "create_connection", refuse)
     monkeypatch.setattr(socket.socket, "connect", refuse)
     monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _drop_plugin_copies() -> Iterator[None]:
+    before = set(sys.modules)
+    yield
+    for name in set(sys.modules) - before:
+        if name.startswith(("telegram_business_history_", "telesec_")):
+            del sys.modules[name]
