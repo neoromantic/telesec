@@ -4,15 +4,15 @@ Thanks for helping. Questions and ideas go to [Discussions](https://github.com/n
 
 ## Set up and run the tests
 
-You need Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). The tests use fake Telegram objects, so they need no bot token, provider key, network, or running gateway.
+You need [uv](https://docs.astral.sh/uv/). It uses Python 3.14 from `.python-version`, the version Hermes installs. The tests use fake Telegram objects, so they need no bot token, provider key, network, or running gateway.
 
 ```bash
 uv sync               # dev tools from uv.lock: pytest, PTB 22.8, PyYAML, ruamel.yaml, Ruff
-uv run pytest -q
+uv run --with pytest-xdist pytest -q -n auto
 uv run ruff check .
 ```
 
-CI runs Ruff and the tests on Python 3.11 to 3.14. The Ruff config is in `pyproject.toml`.
+CI runs the same commands on Python 3.14. The plugin supports Python 3.11 and newer, and Ruff's `py311` target in `pyproject.toml` keeps the syntax within that.
 
 To try a change in a real gateway, install your checkout into a test Hermes profile and follow [docs/VERIFY.md](docs/VERIFY.md). Use a test Business account, not real conversations.
 
