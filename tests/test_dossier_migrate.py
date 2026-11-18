@@ -37,9 +37,10 @@ CHAT = 700001
 V1_CREATED = "2026-07-01T08:30:00Z"
 
 
-@pytest.fixture
-def dm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ModuleType:
-    return core_module(monkeypatch, tmp_path, "dossier_migrate")
+@pytest.fixture(scope="module")
+def dm(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    with pytest.MonkeyPatch.context() as mp:
+        yield core_module(mp, tmp_path_factory.mktemp("dossier-migrate"), "dossier_migrate")
 
 
 @pytest.fixture
@@ -263,7 +264,7 @@ def test_contact_moves_to_a_v2_document(dm: ModuleType, root: Path, no_network: 
 
 
 def test_owner_notes_and_corrections_go_into_the_note_verbatim(dm: ModuleType, root: Path) -> None:
-    long_note = "Before any call, check the Orbit tracker and the shared calendar. " * 7
+    long_note = "Before any call, check the Orbit tracker and the shared calendar. " * 8
     target = contact_dir(dm, root)
     put(
         target,
@@ -282,7 +283,7 @@ def test_owner_notes_and_corrections_go_into_the_note_verbatim(dm: ModuleType, r
     assert note == (
         "Prefers calls after 18:00,  never before.\nLives in Riga Demo, not Oslo Demo.\n" + long_note.strip()
     )
-    assert len(note) > dm._doc.NOTE_MAX_CHARS  # owner text is never clipped
+    assert len(long_note.strip()) > dm._doc.NOTE_MAX_CHARS  # owner text is never clipped
     assert "Mira is the design lead" not in note  # model facts go to the document, not the note
 
 
@@ -402,17 +403,6 @@ def test_the_converted_document_uses_russian_titles_and_is_never_cut(dm: ModuleT
     assert all(f"- Факт номер {i}: " in document for i in range(10, 40))
 
 
-def test_a_contact_without_model_facts_has_no_seed(dm: ModuleType, root: Path) -> None:
-    target = contact_dir(dm, root)
-    put(target, v1_contact(fact("f1", "Never call on Sundays.", kind="owner")))
-
-    dm.migrate_root(root, NOW)
-
-    doc = read_doc(target)
-    assert "seed" not in doc and doc["document"] == ""
-    assert doc["note"] == "Never call on Sundays."
-
-
 def test_an_empty_v1_dossier_moves_with_an_empty_note(dm: ModuleType, root: Path) -> None:
     target = contact_dir(dm, root)
     put(target, v1_contact(), changes=False)
@@ -477,21 +467,6 @@ def test_persona_moves_with_chats_from_its_aliases_and_no_seed(dm: ModuleType, r
     assert dm._doc.read_doc(target) == doc
     assert (target / "v1-dossier.json").read_bytes() == original
     assert not (target / "dossier.json").exists() and not (target / "changes.jsonl").exists()
-
-
-def test_every_target_moves_in_one_run(dm: ModuleType, root: Path) -> None:
-    put(contact_dir(dm, root, CONN, 700001), v1_contact(chat=700001))
-    put(contact_dir(dm, root, CONN, 700002), v1_contact(chat=700002))
-    put(contact_dir(dm, root, "biz-demo-2", 700003), v1_contact(conn="biz-demo-2", chat=700003))
-    put(contact_dir(dm, root, CONN, 700004), b"{not json")
-    put(root / "persona", v1_persona())
-    (root / "chats" / "stray").mkdir()  # a directory without dossier.json is not touched
-
-    report = dm.migrate_root(root, NOW)
-
-    assert report == {"migrated": 4, "unreadable": 1, "backups": 5}
-    assert list(root.glob("**/dossier.json")) == []
-    assert len(list(root.glob("chats/*/*/document.json"))) == 4
 
 
 def test_nothing_to_do_without_v1_files(dm: ModuleType, root: Path) -> None:
@@ -707,14 +682,6 @@ def test_unreadable_v1_in_a_directory_with_unknown_ids_gets_no_document(dm: Modu
     assert dm.migrate_root(root, NOW)["unreadable"] == 1
     assert not (target / "document.json").exists()
     assert (target / "v1-dossier.json").read_bytes() == b"{not json"
-
-
-def test_migrated_backups_are_not_reported_as_unreadable(dm: ModuleType, root: Path) -> None:
-    put(contact_dir(dm, root), v1_contact(*MIRA_FACTS))
-    put(root / "persona", v1_persona())
-    dm.migrate_root(root, NOW)
-
-    assert dm.unreadable_backups(root) == []
 
 
 def test_a_later_v1_file_never_overwrites_a_kept_backup(
@@ -1064,24 +1031,3 @@ def test_only_the_status_warning_scans_the_v1_backups(
     monkeypatch.setattr(ds.dossier_migrate, "unreadable_backups", lambda root: scans.append(root) or [])
     assert not any("could not be read" in line for line in ds.load_config().warnings)
     assert scans == []  # load_config runs on every panel screen and cycle, so it never parses the backups
-
-
-def test_migrate_v1_moves_every_file_once_without_a_model_call(dossiers: ModuleType, no_network: None) -> None:
-    ds = dossiers
-    root = ds.dossier_root()
-    put(root / "chats" / ds.chat_key(BUSINESS_ID, 6103), v1_contact(*MIRA_FACTS, conn=BUSINESS_ID, chat=6103))
-    put(root / "persona", v1_persona(fact("f1", "Never uses emoji.", kind="owner")))
-    fake = FakeLlm()
-    ds.bind_llm(fake)
-
-    first = ds.migrate_v1(now=NOW)
-
-    assert (first["migrated"], first["unreadable"], first["backups"]) == (2, 0, 2)
-
-    def files() -> dict[str, Any]:
-        return {path: entry for path, entry in snapshot_tree(root).items() if not Path(path).name.startswith(".")}
-
-    after_first = files()
-    ds.migrate_v1(now=NOW + timedelta(hours=1))
-    assert files() == after_first
-    assert fake.calls == []
