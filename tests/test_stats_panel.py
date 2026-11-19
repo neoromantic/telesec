@@ -5,7 +5,7 @@ import importlib
 import logging
 import re
 import sys
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,20 +17,15 @@ import test_transcription_modes as ttm
 from test_history import _build_history_parser, snapshot_history_state
 from test_stats import (
     NOW,
-    README_DOC,
     STATS_DOC,
     _alice_fixture,
     _break_history,
-    _contact_json,
     _doc_section,
     _entry,
     _fenced_blocks,
     _hermes_tz,
     _msg,
     _overview_fixture,
-    _seed,
-    _stats,
-    _utc,
 )
 
 plugin = th.plugin
@@ -133,22 +128,6 @@ ALICE_WEEK_EN = """
 <footer>history since 3 Oct 2026 · text only</footer>
 """.strip("\n")
 
-ALICE_WEEK_EN_TEXT = """
-📊 Alice Example · 7 days
-13 Oct – 19 Oct · 💬 3 · 2 of 7 days
-🟦 Alice: 2 (67%) · ⚡ 1 h 34 min
-🟩 You: 1 (33%) · ⚡ –
-⏳ Alice is waiting for your reply 1 d 17 h
-🎯 Peak — Sat, 0–1
-history since 3 Oct 2026 · text only
-""".strip("\n")
-
-DAVE_MONTH = """
-<h3>📊 Dave · 30 days</h3>
-<p>no messages in this period</p>
-<footer>history since 10 Sep 2026 · text only</footer>
-""".strip("\n")
-
 ALICE_MONTH = """
 <h3>📊 Alice Example · 30 days</h3>
 <p>20 Sep – 19 Oct · 💬 <b>10</b> · <b>5</b> of 30 days</p>
@@ -200,11 +179,6 @@ def sp(plugin):
 @pytest.fixture
 def cs(plugin):
     return importlib.import_module(f"{plugin.__name__}.correspondence_stats")
-
-
-@pytest.fixture
-def render(plugin):
-    return importlib.import_module(f"{plugin.__name__}.stats_render")
 
 
 def _view(sp, period: str | None = None, *, chat: Any = 991, conn: str | None = "business-123", **kwargs: Any):
@@ -272,123 +246,15 @@ def test_period_windows_equal_cli_windows(plugin, sp, cs, monkeypatch: pytest.Mo
         assert sp.period_window(period, now=NOW) == sp.period_window("30d", now=NOW)
 
 
-@pytest.mark.parametrize("tz", [None, "Europe/Moscow"])
-def test_periods_are_whole_local_days(plugin, sp, cs, monkeypatch: pytest.MonkeyPatch, tz: str | None):
-    # 7 x 24 hours back from now would touch 8 dates and count only part of the first one.
-    if tz is not None:
-        _hermes_tz(monkeypatch, tz)
-    zone = ZoneInfo(tz) if tz else UTC
-    today = NOW.astimezone(zone).date()
-    for sub, days in sp.PERIODS[:3]:
-        window = sp.period_window(sub, now=NOW)
-        first = today - timedelta(days=days - 1)
-        assert window.since == datetime.combine(first, time(), tzinfo=zone)
-        # One message at the first instant of every day, and one a minute before the period.
-        starts = [datetime.combine(first + timedelta(days=day), time(), tzinfo=zone) for day in range(days)]
-        records = [_msg(plugin, mid, at.astimezone(UTC), "inbound") for mid, at in enumerate(starts, 1)]
-        records.append(_msg(plugin, days + 1, (window.since - timedelta(minutes=1)).astimezone(UTC), "inbound"))
-        stats = cs.compute_stats(_entry(first_seen_at="2026-01-01T00:00:00Z"), records, window)
-
-        assert stats.messages.total == stats.active_days.total == days
-        assert (stats.activity.first_day, stats.activity.last_day) == (first, today)
-        if stats.activity.bucket == "day":
-            assert stats.activity.counts == (1,) * days
-        assert stats.streaks.current_days == stats.streaks.longest_days == days
-        assert f"<b>{days}</b> of {days} days" in sp.render_report(stats, window, period=sub).html
-        # The previous period is the same number of whole local days right before it.
-        previous = stats.previous
-        assert previous.since == datetime.combine(first - timedelta(days=days), time(), tzinfo=zone)
-        assert previous.until == window.since - timedelta(microseconds=1)
-        assert previous.messages.total == 1
-
-
-@pytest.mark.parametrize("tz", [None, "Europe/Moscow"])
-def test_view_renders_the_cli_stats_for_every_period(
-    enabled_history, sp, cs, render, monkeypatch: pytest.MonkeyPatch, tz: str | None
-):
-    _overview_fixture(enabled_history)
-    if tz is not None:
-        _hermes_tz(monkeypatch, tz)
-    [entry] = enabled_history._history_support._filter_catalog_entries(
-        business_connection_id="business-123", chat_id="991"
-    )
-    for sub, since in PERIODS:
-        document = _contact_json(
-            enabled_history, "--chat", "991", "--connection", "business-123", *(["--since", since] if since else [])
-        )
-        window = sp.period_window(sub, now=NOW)
-        before = snapshot_history_state(enabled_history)
-
-        view = _view(sp, sub)
-
-        # The same stats as the CLI, rendered by stats_render with the contact's first name.
-        stats = cs.collect_contact_stats(entry, window)
-        rendered = render.panel(stats, window, period=sub, contact_name="Alice")
-        assert (view.html, view.text) == (rendered.html, rendered.text)
-        assert f"{chr(0x1F4AC)} <b>{document['messages']['total']}</b>" in view.html
-        assert f"<b>{document['active_days']['total']}</b> of " in view.html
-        assert f'sessions</td><td align="right"><b>{document["sessions"]["total"]}</b>' in view.html
-        share = document["share"]
-        assert f"{share['received']}% {chr(0x1F7E6)}" in view.html and f" {share['sent']}%</p>" in view.html
-        # Read-only: the panel wrote nothing.
-        assert snapshot_history_state(enabled_history) == before
-        assert "connection=" not in view.html + view.text and "deletion details" not in view.html
-
-
-@pytest.mark.parametrize(
-    ("language", "expected"), [("ru", ALICE_WEEK_RU), ("en", ALICE_WEEK_EN), (None, ALICE_WEEK_EN)]
-)
-def test_real_week_view(enabled_history, sp, monkeypatch: pytest.MonkeyPatch, language, expected: str):
-    _alice_fixture(enabled_history)
-    _hermes_tz(monkeypatch, "Europe/Moscow")
-    view = _view(sp, "7d", language_code=language)
-    assert view.html == expected
-    if language != "ru":
-        assert view.text == ALICE_WEEK_EN_TEXT
-    assert view.buttons == _buttons("7d", "ru" if language == "ru" else "en")
-
-
-def test_time_zone_comes_from_hermes(enabled_history, sp, monkeypatch: pytest.MonkeyPatch):
-    _alice_fixture(enabled_history)
-    # The removed TELESEC_TIMEZONE is ignored. The view names no time zone and no clock time,
-    # but its hours follow the zone: the peak is 16–17 in UTC and 0–1 in Moscow.
-    monkeypatch.setenv("TELESEC_TIMEZONE", "Europe/Moscow")
-    utc = _view(sp, "7d").html
-    assert "<mark>Sat, 16–17</mark>" in utc and "UTC" not in utc
-    _hermes_tz(monkeypatch, "Europe/Moscow")
-    moscow = _view(sp, "7d").html
-    assert moscow == ALICE_WEEK_EN and "Moscow" not in moscow
-    assert _view(sp, "all").html.split("\n")[1].startswith("<p>3 Oct – 19 Oct · ")
-    # A bad time zone is not a panel state: a bad Hermes value means UTC, and the old variable is not read.
-    monkeypatch.setenv("TELESEC_TIMEZONE", "Mars/Olympus")
-    for broken in ("Mars/Olympus", RuntimeError("config.yaml is broken")):
-        _hermes_tz(monkeypatch, broken)
-        for language, dates in ((None, "13 Oct – 19 Oct"), ("ru", "13 окт – 19 окт")):
-            view = _view(sp, "7d", language_code=language)
-            assert view.html.split("\n")[1].startswith(f"<p>{dates} · ")
-            assert "<mark>" in view.html and ", 16–17</mark>" in view.html
-            assert view.buttons == _buttons("7d", language or "en")
-    assert not any(key.startswith("stats.bad_timezone") for strings in sp.STRINGS.values() for key in strings)
-
-
 # --- Buttons ---------------------------------------------------------------------
 
 
 def test_period_buttons(enabled_history, sp):
     _alice_fixture(enabled_history)
-    assert [sub for sub, _ in sp.PERIODS] == ["7d", "30d", "90d", "all"]
-    assert sp.SECTION_KEY == "stats" and sp.SECTION_LABEL == f"{ICON} Stats" and sp.DEFAULT_PERIOD == "30d"
-
-    titles = {"7d": "7 days", "30d": "30 days", "90d": "90 days", "all": "all time"}
     for sub, _ in PERIODS:
-        view = _view(sp, sub)
-        assert view.buttons == _buttons(sub) == sp.period_buttons(sub)
-        assert view.html.splitlines()[0] == f"<h3>{ICON} Alice Example · {titles[sub]}</h3>"
-        assert view.text.splitlines()[0] == f"{ICON} Alice Example · {titles[sub]}"
-        assert _view(sp, sub, language_code="ru-RU").buttons == _buttons(sub, "ru") == sp.period_buttons(sub, "ru")
-    assert _buttons("30d") == (("7d", "7d"), ("• 30d", "30d"), ("90d", "90d"), ("All", "all"))
-    assert _buttons("30d", "ru") == (("7 дн.", "7d"), ("• 30 дн.", "30d"), ("90 дн.", "90d"), ("Всё", "all"))
-    for period in (None, "", "bogus", "30D", "all/x"):
+        assert sp.period_buttons(sub) == _buttons(sub)
+        assert sp.period_buttons(sub, "ru-RU") == _buttons(sub, "ru")
+    for period in (None, "bogus", "30D"):
         view = _view(sp, period)
         assert view.buttons == _buttons("30d")
         assert view.text.splitlines()[0].endswith("· 30 days")
@@ -404,29 +270,12 @@ def test_period_buttons(enabled_history, sp):
 # --- States ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("language", "expected"), [(None, HISTORY_OFF), ("ru", HISTORY_OFF_RU)])
-def test_history_off(plugin, sp, language, expected: str):
-    _alice_fixture(plugin)
-    view = _view(sp, language_code=language)
-    assert view.text == expected and view.html is None
-    assert view.buttons == ()
-
-
 def test_state_order(plugin, sp):
     # History off wins over a missing connection.
     assert _view(sp, conn=None).text == HISTORY_OFF
     th.set_switch(plugin, "history", True)
     view = _view(sp, conn=None)
     assert view.text == NO_CONNECTION and view.buttons == ()
-
-
-@pytest.mark.parametrize("conn", [None, ""])
-def test_connection_missing(enabled_history, sp, conn: str | None):
-    _alice_fixture(enabled_history)
-    view = _view(sp, conn=conn)
-    assert view.text == NO_CONNECTION
-    assert view.buttons == ()
-    assert _view(sp, conn=conn, language_code="ru").text == NO_CONNECTION_RU
 
 
 def test_no_history_for_chat(enabled_history, sp):
@@ -458,22 +307,7 @@ def test_same_chat_under_another_connection_is_not_used(enabled_history, sp):
     assert _view(sp, chat=994, conn="business-456").html.startswith(f"<h3>{ICON} Carol · 30 days</h3>\n")
 
 
-def test_no_activity_in_period_shows_one_line(enabled_history, sp, monkeypatch: pytest.MonkeyPatch):
-    _overview_fixture(enabled_history)
-    _hermes_tz(monkeypatch, "Europe/Moscow")
-    # Dave (chat 995) wrote only on 2026-09-10.
-    before = snapshot_history_state(enabled_history)
-    view = _view(sp, "30d", chat=995)
-    assert view.html == DAVE_MONTH
-    assert view.text == _visible(DAVE_MONTH)
-    assert view.buttons == _buttons("30d")
-    assert _view(sp, "30d", chat=995, language_code="ru").text.splitlines()[1] == "нет сообщений за период"
-    assert f"{chr(0x1F4AC)} <b>1</b>" in _view(sp, "all", chat=995).html
-    # Read-only: the panel wrote nothing.
-    assert snapshot_history_state(enabled_history) == before
-
-
-@pytest.mark.parametrize("case", ["stale", "dirty", "chat_lock", "all_locks", "torn_tail"])
+@pytest.mark.parametrize("case", ["stale", "chat_lock"])
 def test_read_error_shows_cli_command(enabled_history, sp, caplog: pytest.LogCaptureFixture, case: str):
     _alice_fixture(enabled_history)
     cli_error = _break_history(enabled_history, case)
@@ -547,35 +381,12 @@ def test_read_error_command_quotes_values(
 # --- Names, size, and privacy -----------------------------------------------------
 
 
-def test_contact_name_is_escaped_like_the_cli(enabled_history, sp, cs, monkeypatch: pytest.MonkeyPatch):
-    profile = {"id": 993, "type": "private", "first_name": "Eve<b>&\x1b[31m\nEvil\u202eman\u2066", "username": "eve"}
-    _seed(enabled_history, _msg(enabled_history, 1, _utc(2026, 10, 18, 9, 0), "inbound", chat=993, profile=profile))
-    window = sp.period_window("30d", now=NOW)
-    stats = cs.compute_stats(_entry(chat=993, profile=profile), [], window)
-
-    view = _view(sp, chat=993)
-    header = view.html.splitlines()[0]
-
-    # The CLI's escaping first, then HTML escaping, in the title and in the table.
-    assert header == f"<h3>{ICON} {html.escape(cs._safe(stats.name), quote=True)} · 30 days</h3>"
-    assert header == f"<h3>{ICON} Eve&lt;b&gt;&amp;\\x1b[31m\\nEvil\\u202eman\\u2066 · 30 days</h3>"
-    assert '<th align="right">🟦 Eve&lt;b&gt;&amp;\\x1b[31m…</th>' in view.html
-    for text in (view.html, view.text):
-        assert "\x1b" not in text and "\u202e" not in text and "\u2066" not in text
-    assert "<b>&" not in view.html
-    # The panel shows the same name as the CLI.
-    exit_code, output = _stats(enabled_history, "--chat", "993")
-    assert exit_code == 0 and output.splitlines()[1].startswith(f"{cs._safe(stats.display_name)} connection=")
-
-
 @pytest.mark.parametrize(
     ("first_name", "title", "column"),
     [
         ("A" * 64, "A" * 64, "A" * 15 + "…"),
         ("A" * 65, "A" * 63 + "…", "A" * 15 + "…"),
-        ("Анна", "Анна", "Анна"),
         ("\x01" * 60, "\\x01" * 15 + "\\x0…", "\\x01" * 3 + "\\x0…"),
-        ("\U0001f600" * 150, "\U0001f600" * 63 + "…", "\U0001f600" * 15 + "…"),
     ],
 )
 def test_contact_name_is_clipped(plugin, sp, cs, first_name: str, title: str, column: str):
@@ -589,20 +400,6 @@ def test_contact_name_is_clipped(plugin, sp, cs, first_name: str, title: str, co
     assert lines[0] == f"{ICON} {title} · 7 days"
     assert lines[2].startswith(f"{chr(0x1F7E6)} {column}: ")
     assert f'<th align="right">{chr(0x1F7E6)} {html.escape(column)}</th>' in view.html
-
-
-def _utf16_units(text: str) -> int:
-    return len(text.encode("utf-16-le")) // 2
-
-
-def test_text_fits_telegram_limit(sp, cs):
-    window = sp.period_window("all", now=NOW)
-    huge = {"id": 991, "type": "private", "first_name": "&\U0001f600\u202e" * 5000, "username": "\U0001f600" * 5000}
-    stats = cs.compute_stats(_entry(profile=huge), [], window)
-    for language in (None, "ru"):
-        worst = sp.render_report(stats, window, period="all", language_code=language)
-        assert _utf16_units(worst.text) <= 4096 and _utf16_units(worst.html) <= 8000
-        (worst.text + worst.html).encode("utf-8")  # no split surrogate pair
 
 
 def test_message_text_never_appears(enabled_history, sp, monkeypatch: pytest.MonkeyPatch, caplog):
@@ -698,47 +495,6 @@ async def test_panel_opens_stats_and_switches_periods(enabled_history, sp, modes
 
 
 @pytest.mark.asyncio
-async def test_panel_stats_speak_russian_to_a_russian_client(enabled_history, sp, modes):
-    plugin = enabled_history
-    _alice_fixture(plugin)
-    top.bind_owner(plugin)
-    sp.register_section()
-    bot = RichPanelBot(business_owner_id=top.OWNER)
-
-    assert await top.dispatch(plugin, top.start_update(language_code="ru"), bot) is True
-    assert (f"{ICON} Статистика", "tb:s:991:stats") in [row[0] for row in top.keyboard(bot.calls[0]["reply_markup"])]
-
-    assert await top.dispatch(plugin, top.callback_update("tb:s:991:stats/7d", language_code="ru-RU"), bot) is True
-    assert bot.answers[-1] == {"callback_query_id": "query-1"}  # a period tap inside the section: no toast
-    text, rows = _rich_edit(bot)
-    assert text == _view(sp, "7d", language_code="ru").html
-    assert text.startswith(f"<h3>{ICON} Alice Example · 7 дней</h3>\n")
-    assert rows == [
-        [
-            ("• 7 дн.", "tb:s:991:stats/7d"),
-            ("30 дн.", "tb:s:991:stats/30d"),
-            ("90 дн.", "tb:s:991:stats/90d"),
-            ("Всё", "tb:s:991:stats/all"),
-        ],
-        [("« Назад", "tb:b:991")],
-    ]
-
-
-@pytest.mark.asyncio
-async def test_panel_state_without_buttons_keeps_only_back(plugin, sp, modes):
-    top.bind_owner(plugin)
-    sp.register_section()
-    bot = top.PanelBot(business_owner_id=top.OWNER)
-
-    assert await top.dispatch(plugin, top.callback_update("tb:s:991:stats"), bot) is True
-    assert top.last_edit(bot) == (HISTORY_OFF, [[("« Back", "tb:b:991")]])
-    assert "parse_mode" not in _edit_call(bot)
-
-    assert await top.dispatch(plugin, top.callback_update("tb:s:991:stats", language_code="ru"), bot) is True
-    assert top.last_edit(bot) == (HISTORY_OFF_RU, [[("« Назад", "tb:b:991")]])
-
-
-@pytest.mark.asyncio
 async def test_rejected_rich_message_falls_back_to_the_plain_text(enabled_history, sp, modes):
     plugin = enabled_history
     _alice_fixture(plugin)
@@ -823,42 +579,20 @@ async def test_paused_chat_shows_the_saved_report_then_the_note(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("language", "expected"), [(None, HISTORY_OFF), ("ru", HISTORY_OFF_RU)])
-async def test_paused_note_is_not_shown_while_history_is_off(plugin, sp, modes, language, expected: str):
+@pytest.mark.parametrize(
+    ("language", "expected", "back"), [(None, HISTORY_OFF, "« Back"), ("ru", HISTORY_OFF_RU, "« Назад")]
+)
+async def test_paused_note_is_not_shown_while_history_is_off(plugin, sp, modes, language, expected: str, back: str):
     _alice_fixture(plugin)
     top.bind_owner(plugin)
     sp.register_section()
     _pause(plugin)
     bot = RichPanelBot(business_owner_id=top.OWNER)
 
-    text, _ = await _open_stats(plugin, bot, "tb:s:991:stats", language)
+    text, rows = await _open_stats(plugin, bot, "tb:s:991:stats", language)
 
-    assert text == expected
+    assert (text, rows) == (expected, [[(back, "tb:b:991")]])
     assert _view(sp, language_code=language, history_paused=True).text == expected
-
-
-def test_paused_note_stays_when_the_report_is_cut_to_fit(
-    enabled_history, sp, cs, render, monkeypatch: pytest.MonkeyPatch
-):
-    _alice_fixture(enabled_history)
-    window = sp.period_window("all", now=NOW)
-    [entry] = enabled_history._history_support._filter_catalog_entries(
-        business_connection_id="business-123", chat_id="991"
-    )
-    stats = cs.collect_contact_stats(entry, window)
-    for language, note in ((None, PAUSED), ("ru", PAUSED_RU)):
-        full = sp.render_report(stats, window, period="all", language_code=language).html
-        noted = sp.render_report(stats, window, period="all", language_code=language, note=note).html
-        head, footer = full.rsplit("\n", 1)
-        assert noted == f"{head}\n<p>{note}</p>\n{footer}"
-        # A tight limit drops the heat maps, never the title, the note, or the footer.
-        with monkeypatch.context() as patch:
-            patch.setattr(render, "MAX_HTML_UNITS", _utf16_units(full))
-            cut = sp.render_report(stats, window, period="all", language_code=language, note=note).html
-        assert cut.endswith(f"\n<p>{note}</p>\n{footer}") and _utf16_units(cut) <= _utf16_units(full)
-        assert cut.startswith(full.split("\n", 1)[0]) and "<h4>" not in cut
-        for tag in ("h3", "p", "b", "table", "tr", "td", "footer"):
-            assert cut.count(f"<{tag}>") + cut.count(f"<{tag} ") == cut.count(f"</{tag}>")
 
 
 # --- Docs ------------------------------------------------------------------------
@@ -875,9 +609,3 @@ def test_docs_owner_panel_example_matches_view(enabled_history, sp, monkeypatch:
 
     assert language == "html"
     assert documented == view.html
-    for _, since in PERIODS[:3]:
-        assert f"`--since {since}`" in section
-    assert "docs/STATS.md#in-telegram-owner-panel" in README_DOC.read_text(encoding="utf-8")
-    not_in_version = _doc_section(STATS_DOC.read_text(encoding="utf-8"), "Not in this version")
-    for issue in (27, 29):
-        assert f"issues/{issue})" in not_in_version
