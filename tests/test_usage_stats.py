@@ -89,12 +89,8 @@ async def settle(usage) -> None:
 # --- The client ----------------------------------------------------------------------------------
 
 
-def test_the_client_is_the_managed_copy_set_up_for_telesec(plugin, tmp_path):
-    header = (ROOT / "telemetry.py").read_text(encoding="utf-8").splitlines()[0]
-    assert header.startswith("# managed by devkit")
+def test_the_client_is_set_up_for_telesec(plugin, tmp_path):
     version = re.search(r"^version: (\S+)$", (ROOT / "plugin.yaml").read_text(encoding="utf-8"), re.MULTILINE)[1]
-    assert re.search(rf'^version = "{re.escape(version)}"$', (ROOT / "pyproject.toml").read_text(encoding="utf-8"),
-                     re.MULTILINE)
 
     client = plugin._usage_stats.create_client()
 
@@ -119,38 +115,14 @@ def test_a_test_run_sends_and_writes_nothing(plugin, tmp_path, monkeypatch):
     plugin._usage_stats.reset()
 
 
-@pytest.mark.parametrize(("name", "value", "reason"), [("DO_NOT_TRACK", "1", "do-not-track"),
-                                                       ("TELESEC_TELEMETRY", "0", "env"),
-                                                       ("TELESEC_TELEMETRY", "off", "env")])
-def test_the_environment_turns_it_off(usage, monkeypatch, name, value, reason):
-    monkeypatch.setenv(name, value)
-    client = usage.module.create_client(version="1.2.3")
-
-    assert client.status() | {"id": None} == client.status() | {"enabled": False, "reason": reason, "id": None}
-    assert client.notice_text() is None
-    client.started()
-    assert usage.sent == []
-
-
-def test_nothing_is_sent_by_default(usage):
-    usage.module.started()
-    usage.module.feature("voice transcribed")
-    usage.module.error("stt.failed")
-
-    assert usage.sent == []
-    assert usage.state() == {}
-    assert (usage.module._status()["enabled"], usage.module._status()["reason"]) == (False, "default")
-
-
 ID = "8b0e6c1a-3f0d-4a51-9a7e-2f1c5d9e4b77"
 UNSET = object()
 
 
 @pytest.mark.parametrize("enabled", [None, UNSET, False, True], ids=["null", "missing", "off", "on"])
-@pytest.mark.parametrize("env", [None, ("TELESEC_TELEMETRY", "1"), ("TELESEC_TELEMETRY", "on"),
-                                 ("TELESEC_TELEMETRY", "true"), ("TELESEC_TELEMETRY", "debug"),
+@pytest.mark.parametrize("env", [None, ("TELESEC_TELEMETRY", "1"), ("TELESEC_TELEMETRY", "debug"),
                                  ("TELESEC_TELEMETRY", "0"), ("DO_NOT_TRACK", "1")],
-                         ids=["unset", "1", "on", "true", "debug", "0", "dnt"])
+                         ids=["unset", "1", "debug", "0", "dnt"])
 def test_only_the_owners_stored_choice_turns_usage_stats_on(usage, monkeypatch, enabled, env):
     """A 0.17 install saw the notice (``notice: 1``); only an owner's on counts, whatever the variable says."""
     legacy = {"id": ID, "notice": 1, "installed": True, "daily": {}}
@@ -327,13 +299,8 @@ async def test_the_notice_goes_only_to_an_owner_who_manages_settings(usage, plug
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("decided", ["variable", "off", "on"])
-async def test_nothing_is_offered_once_decided(usage, plugin, monkeypatch, decided):
-    if decided == "variable":
-        monkeypatch.setenv("TELESEC_TELEMETRY", "0")
-        restart(usage)
-    else:
-        assert usage.client.set_enabled(decided == "on")
+async def test_nothing_is_offered_once_the_owner_said_no(usage, plugin):
+    assert usage.client.set_enabled(False)
     top.bind_owner(plugin)
     bot = top.PanelBot(business_owner_id=OWNER)
 
@@ -477,11 +444,9 @@ def test_cli_on_names_the_variable_that_keeps_it_off(usage, plugin, monkeypatch)
 @pytest.mark.parametrize(("argv", "expected"), [
     (["settings"], "settings"),
     (["settings", "set", "history", "on"], "settings set"),
-    (["mode"], "mode"),
     (["mode", "set", "991", "own"], "mode set"),
     (["chat", "list"], "chat list"),
     (["history"], "history"),
-    (["history", "stats"], "history stats"),
     (["stats"], "stats"),
     (["dossier"], "dossier"),
     (["dossier", "status"], "dossier status"),

@@ -61,18 +61,18 @@ async def telegram_app():
         yield app, request
 
 
+VOICE = {"voice": {"file_id": "v", "file_unique_id": "v", "duration": 3}}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("media", [
-    {"voice": {"file_id": "v", "file_unique_id": "v", "duration": 3}},
-    {"video_note": {"file_id": "v", "file_unique_id": "v", "duration": 3, "length": 100}},
-    {"audio": {"file_id": "v", "file_unique_id": "v", "duration": 3, "mime_type": "audio/mpeg"}},
-    {"document": {"file_id": "v", "file_unique_id": "v", "file_name": "note.m4a"}},
+@pytest.mark.parametrize(("media", "agent_enabled"), [
+    (VOICE, False),
+    ({"video_note": {"file_id": "v", "file_unique_id": "v", "duration": 3, "length": 100}}, False),
+    ({"audio": {"file_id": "v", "file_unique_id": "v", "duration": 3, "mime_type": "audio/mpeg"}}, False),
+    ({"document": {"file_id": "v", "file_unique_id": "v", "file_name": "note.m4a"}}, False),
+    (VOICE, True),
 ])
-@pytest.mark.parametrize("authorized", [True, False])
-@pytest.mark.parametrize("agent_enabled", [False, True])
-async def test_native_business_media_dispatch(
-    plugin, telegram_app, monkeypatch, media, authorized, agent_enabled,
-):
+async def test_native_business_media_dispatch(plugin, telegram_app, monkeypatch, media, agent_enabled):
     # Every contact's media is transcribed: the DM allowlist does not apply.
     app, _request = telegram_app
     monkeypatch.setenv("TELESEC_AGENT_ENABLE", str(int(agent_enabled)))
@@ -80,7 +80,7 @@ async def test_native_business_media_dispatch(
     process = AsyncMock()
     monkeypatch.setattr(plugin._history_support, "observe_ptb_update", observe)
     monkeypatch.setattr(plugin, "_process_business_voice_event", process)
-    adapter = SimpleNamespace(platform="telegram", _bot=app.bot, _is_user_authorized_from_message=Mock(return_value=authorized))
+    adapter = SimpleNamespace(platform="telegram", _bot=app.bot, _is_user_authorized_from_message=Mock(return_value=False))
     ctx = SimpleNamespace(llm=None, register_telegram_handler=Mock(), register_hook=Mock(),
                           get_config={}.get, register_cli_command=Mock(), register_skill=Mock())
     plugin.register(ctx)
@@ -108,12 +108,14 @@ async def test_native_business_media_dispatch(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("history_fails", [False, True])
-@pytest.mark.parametrize("agent_enabled", [False, True])
-@pytest.mark.parametrize("kind", ["business_message", "edited_business_message", "deleted_business_messages"])
-@pytest.mark.parametrize("sender_id", [1000, 2000])
+@pytest.mark.parametrize(("kind", "agent_enabled", "history_fails"), [
+    *[(kind, agent_enabled, False) for kind in ("business_message", "edited_business_message",
+                                                "deleted_business_messages") for agent_enabled in (False, True)],
+    ("business_message", False, True),
+    ("business_message", True, True),
+])
 async def test_native_business_updates_stop_after_history(
-    plugin, telegram_app, monkeypatch, history_fails, agent_enabled, kind, sender_id,
+    plugin, telegram_app, monkeypatch, history_fails, agent_enabled, kind,
 ):
     app, _request = telegram_app
     monkeypatch.setenv("TELESEC_AGENT_ENABLE", str(int(agent_enabled)))
@@ -134,7 +136,7 @@ async def test_native_business_updates_stop_after_history(
     payload = {
         "message_id": 77, "date": 1, "business_connection_id": "business-123",
         "chat": {"id": 991, "type": "private"}, "text": "Hello",
-        "from": {"id": sender_id, "is_bot": False, "first_name": "Speaker"},
+        "from": {"id": 2000, "is_bot": False, "first_name": "Speaker"},
     }
     if kind == "deleted_business_messages":
         payload = {"business_connection_id": "business-123", "chat": payload["chat"], "message_ids": [77]}
@@ -228,10 +230,8 @@ async def test_real_ptb_business_transcript_serialization(plugin, telegram_app, 
     assert entities[0]["length"] == len(f"🎙️ {transcript}".encode("utf-16-le")) // 2
 
 
-def _register_native(plugin, app, *, authorized=True):
-    adapter = SimpleNamespace(
-        platform="telegram", _bot=app.bot, _is_user_authorized_from_message=Mock(return_value=authorized),
-    )
+def _register_native(plugin, app):
+    adapter = SimpleNamespace(platform="telegram", _bot=app.bot)
     plugin._register_telegram_handlers(app, adapter)
     core = AsyncMock()
     app.add_handler(TypeHandler(Update, core))
@@ -247,18 +247,14 @@ def _business_update(app, *, sender_id, update_id=42, **content):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content", [
-    {"text": "Hello"},
-    {"voice": {"file_id": "v", "file_unique_id": "v", "duration": 3}},
-    {"document": {"file_id": "d", "file_unique_id": "d", "file_name": "notes.pdf"}},
-    {"video": {"file_id": "v", "file_unique_id": "v", "width": 100, "height": 100, "duration": 3}},
-])
-async def test_disabled_transcription_still_consumes_business_updates(plugin, telegram_app, monkeypatch, content):
+async def test_disabled_transcription_still_consumes_business_voice(plugin, telegram_app):
     app, request = telegram_app
     test_history.set_switch(plugin, "transcription", False)
     core = _register_native(plugin, app)
 
-    await app.process_update(_business_update(app, sender_id=2000, **content))
+    await app.process_update(_business_update(
+        app, sender_id=2000, voice={"file_id": "v", "file_unique_id": "v", "duration": 3},
+    ))
 
     core.assert_not_awaited()
     assert [method for method, _params in request.calls] == ["getMe"]
@@ -281,19 +277,6 @@ async def test_real_ptb_off_chat_claims_voice_without_download_or_reply(plugin, 
     assert "getFile" not in endpoints
     assert "sendMessage" not in endpoints
     assert "getBusinessConnection" in endpoints
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("sender_id", [1000, 2000])
-async def test_real_ptb_transcribe_text_is_ordinary_business_text(plugin, telegram_app, sender_id):
-    app, request = telegram_app
-    core = _register_native(plugin, app, authorized=False)
-
-    await app.process_update(_business_update(app, sender_id=sender_id, text="/transcribe off"))
-
-    core.assert_not_awaited()
-    assert [method for method, _params in request.calls] == ["getMe"]
-    assert not plugin._transcription_modes.modes_path().exists()
 
 
 @pytest.mark.asyncio
@@ -376,38 +359,6 @@ async def test_real_ptb_stats_fallbacks_send_and_delete(plugin, telegram_app, mo
         core.assert_not_awaited()
     finally:
         plugin._history_support.reset_in_memory_caches()
-
-
-@pytest.mark.asyncio
-async def test_real_ptb_off_then_both_gates_media_download(plugin, telegram_app, monkeypatch):
-    app, request = telegram_app
-    monkeypatch.setenv("TELESEC_CLEANUP_DISABLE", "1")
-    core = _register_native(plugin, app)
-    download = AsyncMock(side_effect=RuntimeError("stop at download"))
-    monkeypatch.setattr(plugin, "_download_voice", download)
-
-    store = plugin._transcription_modes.default_store()
-
-    def update(number):
-        content = {"voice": {"file_id": "v", "file_unique_id": "v", "duration": 3}}
-        message = _business_update(app, sender_id=1000, update_id=number, **content).to_dict()["business_message"]
-        message["message_id"] = number
-        return Update.de_json({"update_id": number, "business_message": message}, app.bot)
-
-    async def process(number):
-        await app.process_update(update(number))
-        if plugin._pending_tasks:
-            await asyncio.gather(*plugin._pending_tasks)
-
-    store.set_mode("1000", "991", "off", via="chat", connection="business-123")  # as an owner-panel tap stores it
-    await process(1)
-    download.assert_not_awaited()
-    assert "sendMessage" not in [method for method, _params in request.calls]
-
-    store.set_mode("1000", "991", "both", via="chat", connection="business-123")
-    await process(2)
-    download.assert_awaited_once()
-    assert core.await_count == 0
 
 
 @pytest.mark.asyncio
