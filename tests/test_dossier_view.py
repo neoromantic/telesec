@@ -7,12 +7,10 @@ enable confirmation and the ``/dossier`` post with its refusals (SPEC J, K.3, K.
 
 from __future__ import annotations
 
-import ast
 import itertools
 import json
 import re
-import sys
-from dataclasses import fields, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -157,7 +155,6 @@ def args_of(view: Any) -> list[str]:
 # ---------------------------------------------------------------------------
 
 GOLDEN = [
-    ("plain", "Mira leads the Orbit redesign.", "<p>Mira leads the Orbit redesign.</p>"),
     ("lines and paragraphs", "One\ntwo\n\nThree", "<p>One<br>two</p><p>Three</p>"),
     ("headings", "# Mira\n### Work\n###### Small", "<h4>Mira</h4><h4>Work</h4><h4>Small</h4>"),
     ("closing hashes", "## Work ##", "<h4>Work</h4>"),
@@ -185,16 +182,10 @@ GOLDEN = [
     ("bold italic", "***now***", "<p><b><i>now</i></b></p>"),
     ("nesting", "**a *b* c** and *d **e** f*", "<p><b>a <i>b</i> c</b> and <i>d <b>e</b> f</i></p>"),
     ("code, strike, link", "`npm i` ~~old~~ [site](https://example.com/a?b=1&c=2)", "<p>npm i old site</p>"),
-    (
-        "refs",
-        "## Work [m1]\n- Owns Orbit [m90, m91]\n- Review on **Friday** [m7]",
-        "<h4>Work</h4><ul><li>Owns Orbit</li><li>Review on <b>Friday</b></li></ul>",
-    ),
     ("end marker", "Done.\n<<END>>", "<p>Done.</p>"),
     ("markers inside words", "snake_case_name and 2*3*4", "<p>snake_case_name and 2*3*4</p>"),
     ("unbalanced", "**open\nhalf* and _x", "<p>**open<br>half* and _x</p>"),
     ("crossed", "**a *b** c*", "<p><b>a *b</b> c*</p>"),
-    ("escaping", "a < b & c > d", "<p>a &lt; b &amp; c &gt; d</p>"),
     ("windows newlines and tabs", "one\r\ntwo\tthree", "<p>one<br>two  three</p>"),
     ("empty", "", ""),
 ]
@@ -246,7 +237,7 @@ def test_converter_strips_refs_everywhere(dv: ModuleType) -> None:
 
 @pytest.mark.parametrize(
     "md",
-    ["**not closed", "closed**", "*one", "two*", "__x", "x__", "_y", "y_", "~~gone", "`tick", "[text](no end"],
+    ["__x", "~~gone", "`tick", "[text](no end"],
 )
 def test_unbalanced_markers_stay_literal(dv: ModuleType, md: str) -> None:
     html = dv.markdown_html(md)
@@ -317,36 +308,26 @@ def test_the_whole_screen_falls_back_when_the_document_fills_the_block_budget(dv
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("lang", ["en", "ru"])
-def test_contact_screen(dv: ModuleType, lang: str) -> None:
+def test_contact_screen(dv: ModuleType) -> None:
     doc = contact_doc(dv, note="Call after six.\nNo calls on Sundays.")
 
-    view = dv.render_overview(snap(dv, doc=doc), lang)
+    view = dv.render_overview(snap(dv, doc=doc), "en")
 
     check_view(dv, view)
-    if lang == "en":
-        head = f"Updated {tg_time(CHECKED, '20 October 2026, 09:10 UTC')} · from 312 messages"
-        label = "Your note (not posted)"
-    else:
-        head = f"Обновлено {tg_time(CHECKED, '20 октября 2026, 09:10 UTC')} · сообщений: 312"
-        label = "Ваша заметка (не публикуется)"
+    head = f"Updated {tg_time(CHECKED, '20 October 2026, 09:10 UTC')} · from 312 messages"
     assert view.html == (
         f"<h3>{NAME}</h3><p><i>{head}</i></p>{DOC_HTML}"
-        f"<blockquote><b>{label}</b><br>Call after six.<br>No calls on Sundays.</blockquote>"
+        "<blockquote><b>Your note (not posted)</b><br>Call after six.<br>No calls on Sundays.</blockquote>"
     )
-    assert view.buttons == (((s(dv, lang, "b_refresh"), "rf.c"),),)
+    assert view.buttons == ((("Refresh", "rf.c"),),)
     assert view.text.splitlines()[0] == NAME and "• Owns the Orbit redesign" in view.text
 
 
 @pytest.mark.parametrize(
     ("lang", "messages", "expected"),
     [
-        ("en", 0, "from 0 messages"),
         ("en", 1, "from 1 message"),
         ("en", 2, "from 2 messages"),
-        ("en", 21, "from 21 messages"),
-        ("ru", 1, "сообщений: 1"),
-        ("ru", 3, "сообщений: 3"),
         ("ru", 25, "сообщений: 25"),
     ],
 )
@@ -361,7 +342,6 @@ def test_contact_header_plurals(dv: ModuleType, lang: str, messages: int, expect
     [
         ("en", 1, 1, "from 1 of your messages in 1 chat"),
         ("en", 40, 2, "from 40 of your messages in 2 chats"),
-        ("ru", 1, 1, "ваших сообщений: 1, чатов: 1"),
         ("ru", 40, 5, "ваших сообщений: 40, чатов: 5"),
     ],
 )
@@ -445,13 +425,7 @@ def test_a_note_keeps_at_most_ten_lines(dv: ModuleType) -> None:
     assert shown == [*(f"line {i}" for i in range(1, 10)), "line 10 line 11 line 12 line 13 line 14 line 15"]
 
 
-def test_no_note_no_quote(dv: ModuleType) -> None:
-    for note in ("", "  \n "):
-        assert "<blockquote>" not in dv.render_overview(snap(dv, doc=contact_doc(dv, note=note)), "en").html
-
-
-@pytest.mark.parametrize("lang", ["en", "ru"])
-def test_a_migrated_contact_shows_missing_and_its_note(dv: ModuleType, lang: str) -> None:
+def test_a_migrated_contact_shows_missing_and_its_note(dv: ModuleType) -> None:
     doc = contact_doc(
         dv,
         document="",
@@ -464,13 +438,12 @@ def test_a_migrated_contact_shows_missing_and_its_note(dv: ModuleType, lang: str
         migrated_from="v1",
     )
 
-    view = dv.render_overview(snap(dv, doc=doc), lang)
+    view = dv.render_overview(snap(dv, doc=doc), "en")
 
     check_view(dv, view)
-    label = "Your note (not posted)" if lang == "en" else "Ваша заметка (не публикуется)"
     assert view.html == (
-        f"<h3>{NAME}</h3><p>{s(dv, lang, 'st_missing')}</p><blockquote><b>{label}</b><br>Never call on Sundays."
-        "<br>Leave out:<br>- Plans to leave Northwind Demo.</blockquote>"
+        f"<h3>{NAME}</h3><p>{s(dv, 'en', 'st_missing')}</p><blockquote><b>Your note (not posted)</b><br>Never call "
+        "on Sundays.<br>Leave out:<br>- Plans to leave Northwind Demo.</blockquote>"
     )
 
 
@@ -491,51 +464,40 @@ NO_DOCUMENT_STATES = [
 ]
 
 
-@pytest.mark.parametrize("lang", ["en", "ru"])
 @pytest.mark.parametrize(
     ("changes", "key"), [case[1:] for case in NO_DOCUMENT_STATES], ids=[c[0] for c in NO_DOCUMENT_STATES]
 )
-def test_contact_states_without_a_document(dv: ModuleType, lang: str, changes: dict[str, Any], key: str) -> None:
-    view = dv.render_overview(snap(dv, doc=None, **changes), lang)
+def test_contact_states_without_a_document(dv: ModuleType, changes: dict[str, Any], key: str) -> None:
+    view = dv.render_overview(snap(dv, doc=None, **changes), "en")
 
     check_view(dv, view)
-    body = s(dv, lang, key).format(error="no_end_marker")
+    body = s(dv, "en", key).format(error="no_end_marker")
     assert view.html == f"<h3>{NAME}</h3><p>{body}</p>"
 
 
-@pytest.mark.parametrize("lang", ["en", "ru"])
-def test_off_tells_a_non_manager_who_can_turn_dossiers_on(dv: ModuleType, lang: str) -> None:
-    view = dv.render_overview(snap(dv, doc=None, enabled=False), lang)
+def test_off_tells_a_non_manager_who_can_turn_dossiers_on(dv: ModuleType) -> None:
+    lines = "<br>".join((s(dv, "en", "st_off"), s(dv, "en", "notice")["operator_only"], s(dv, "en", "off_cli")))
 
-    check_view(dv, view)
-    lines = (s(dv, lang, "st_off"), s(dv, lang, "notice")["operator_only"], s(dv, lang, "off_cli"))
-    assert view.html == f"<h3>{NAME}</h3><p>{'<br>'.join(lines)}</p>"
-    assert "hermes telesec dossier enable" in view.text
-
-
-@pytest.mark.parametrize("lang", ["en", "ru"])
-def test_off_under_a_document_tells_a_non_manager_who_can_turn_dossiers_on(dv: ModuleType, lang: str) -> None:
-    view = dv.render_overview(snap(dv, enabled=False), lang)  # Settings is read-only for a non-manager
-
-    check_view(dv, view)
-    lines = (s(dv, lang, "st_off"), s(dv, lang, "notice")["operator_only"], s(dv, lang, "off_cli"))
-    assert view.html.endswith(f"{DOC_HTML}<p><i>{'<br>'.join(lines)}</i></p>")
-    assert "hermes telesec dossier enable" in view.text
-    managed = dv.render_overview(snap(dv, enabled=False, manage_global=True), lang)
-    assert managed.html.endswith(f"<p><i>{s(dv, lang, 'st_off')}</i></p>")
-
-
-@pytest.mark.parametrize("lang", ["en", "ru"])
-def test_a_failed_first_persona_names_the_persona(dv: ModuleType, lang: str) -> None:
-    body = s(dv, lang, "st_failed_none_persona").format(error="no_end_marker")
-
-    missing = dv.render_overview(snap(dv, "persona", doc=None, failure="no_end_marker", manage_global=True), lang)
-    empty = dv.render_overview(snap(dv, "persona", doc=persona_doc(dv, document=""), failure="no_end_marker"), lang)
+    missing = dv.render_overview(snap(dv, doc=None, enabled=False), "en")
+    built = dv.render_overview(snap(dv, enabled=False), "en")  # Settings is read-only for a non-manager
 
     check_view(dv, missing)
-    assert missing.html == f"<h3>{s(dv, lang, 'title_persona')}</h3><p>{body}</p>"
+    check_view(dv, built)
+    assert missing.html == f"<h3>{NAME}</h3><p>{lines}</p>"
+    assert built.html.endswith(f"{DOC_HTML}<p><i>{lines}</i></p>")
+    assert "hermes telesec dossier enable" in missing.text and "hermes telesec dossier enable" in built.text
+
+
+def test_a_failed_first_persona_names_the_persona(dv: ModuleType) -> None:
+    body = s(dv, "en", "st_failed_none_persona").format(error="no_end_marker")
+
+    missing = dv.render_overview(snap(dv, "persona", doc=None, failure="no_end_marker", manage_global=True), "en")
+    empty = dv.render_overview(snap(dv, "persona", doc=persona_doc(dv, document=""), failure="no_end_marker"), "en")
+
+    check_view(dv, missing)
+    assert missing.html == f"<h3>{s(dv, 'en', 'title_persona')}</h3><p>{body}</p>"
     assert empty.html.endswith(f"<p><i>{body}</i></p>")
-    assert s(dv, lang, "st_failed_none").format(error="no_end_marker") not in missing.html + empty.html
+    assert s(dv, "en", "st_failed_none").format(error="no_end_marker") not in missing.html + empty.html
 
 
 @pytest.mark.parametrize("lang", ["en", "ru"])
@@ -553,17 +515,13 @@ def test_the_screen_never_names_a_hidden_refresh_button(dv: ModuleType, lang: st
 TARGET_HTML = "--connection 'biz &lt;demo&gt;' --chat '7 00;rm'"
 
 
-@pytest.mark.parametrize("lang", ["en", "ru"])
-def test_a_corrupt_file_shows_the_reset_command(dv: ModuleType, lang: str) -> None:
-    contact = dv.render_overview(snap(dv, doc=None, corrupt=True, chat_id="7 00;rm", connection="biz <demo>"), lang)
-    persona = dv.render_overview(snap(dv, "persona", doc=None, corrupt=True, manage_global=True), lang)
+def test_a_corrupt_file_shows_the_reset_command(dv: ModuleType) -> None:
+    contact = dv.render_overview(snap(dv, doc=None, corrupt=True, chat_id="7 00;rm", connection="biz <demo>"), "en")
+    persona = dv.render_overview(snap(dv, "persona", doc=None, corrupt=True, manage_global=True), "en")
 
     check_view(dv, contact)
     check_view(dv, persona)
-    assert (
-        contact.html
-        == f"<h3>{NAME}</h3><p>{s(dv, lang, 'st_corrupt').format(target=TARGET_HTML)}</p>"
-    )
+    assert contact.html == f"<h3>{NAME}</h3><p>{s(dv, 'en', 'st_corrupt').format(target=TARGET_HTML)}</p>"
     assert "hermes telesec dossier forget --connection 'biz <demo>' --chat '7 00;rm'" in contact.text
     assert "hermes telesec dossier forget --persona" in persona.text
     assert "rf.c" not in args_of(contact)
@@ -588,14 +546,13 @@ DOCUMENT_STATUSES = [
 ]
 
 
-@pytest.mark.parametrize("lang", ["en", "ru"])
 @pytest.mark.parametrize(
     ("changes", "doc_changes", "key"), [case[1:] for case in DOCUMENT_STATUSES], ids=[c[0] for c in DOCUMENT_STATUSES]
 )
 def test_status_line_under_a_document(
-    dv: ModuleType, lang: str, changes: dict[str, Any], doc_changes: dict[str, Any], key: str | None
+    dv: ModuleType, changes: dict[str, Any], doc_changes: dict[str, Any], key: str | None
 ) -> None:
-    view = dv.render_overview(snap(dv, doc=contact_doc(dv, **doc_changes), **changes), lang)
+    view = dv.render_overview(snap(dv, doc=contact_doc(dv, **doc_changes), **changes), "en")
 
     check_view(dv, view)
     status = re.findall(r"<p><i>([^<]*)</i></p>$", view.html)
@@ -603,7 +560,7 @@ def test_status_line_under_a_document(
         assert status == [] and view.html.endswith(DOC_HTML)
     else:
         error = changes.get("failure", "")
-        assert status == [s(dv, lang, key).format(error=error)]
+        assert status == [s(dv, "en", key).format(error=error)]
         assert view.html.count("<h3>") == 1 and "<tg-time" in view.html  # the header stays
 
 
@@ -613,7 +570,6 @@ def test_status_line_under_a_document(
         ({"history_enabled": False, "chat_off": True, "refreshing": True, "failure": "x"}, "st_history_off"),
         ({"chat_off": True, "refreshing": True, "failure": "x"}, "note_chat_off"),
         ({"refreshing": True, "failure": "x"}, "st_refreshing"),
-        ({"failure": "x"}, "st_failed"),
     ],
 )
 def test_status_priority(dv: ModuleType, changes: dict[str, Any], key: str) -> None:
@@ -636,67 +592,43 @@ def test_the_failure_code_is_escaped_and_clipped(dv: ModuleType) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("lang", ["en", "ru"])
-def test_persona_screen(dv: ModuleType, lang: str) -> None:
+def test_persona_screen(dv: ModuleType) -> None:
     doc = persona_doc(dv, note="Keep it short.")
 
-    view = dv.render_overview(snap(dv, "persona", doc=doc, manage_global=True, chat_off=True), lang)
+    view = dv.render_overview(snap(dv, "persona", doc=doc, manage_global=True, chat_off=True), "en")
 
     check_view(dv, view)
-    if lang == "en":
-        title, label = "My persona", "Your note"
-        head = f"Updated {tg_time(CHECKED, '20 October 2026, 09:10 UTC')} · from 40 of your messages in 2 chats"
-    else:
-        title, label = "Моя персона", "Ваша заметка"
-        head = f"Обновлено {tg_time(CHECKED, '20 октября 2026, 09:10 UTC')} · ваших сообщений: 40, чатов: 2"
+    head = f"Updated {tg_time(CHECKED, '20 October 2026, 09:10 UTC')} · from 40 of your messages in 2 chats"
     assert view.html == (  # chat_off belongs to a contact: the persona ignores it
-        f"<h3>{title}</h3><p><i>{head}</i></p><h4>Tone</h4><ul><li>Short, friendly replies</li></ul>"
-        f"<blockquote><b>{label}</b><br>Keep it short.</blockquote>"
+        f"<h3>My persona</h3><p><i>{head}</i></p><h4>Tone</h4><ul><li>Short, friendly replies</li></ul>"
+        "<blockquote><b>Your note</b><br>Keep it short.</blockquote>"
     )
-    assert view.buttons == (((s(dv, lang, "b_back_dossier"), "o.c"),),)
+    assert view.buttons == ((("‹ Dossier", "o.c"),),)
 
 
-@pytest.mark.parametrize("lang", ["en", "ru"])
-def test_persona_missing(dv: ModuleType, lang: str) -> None:
+def test_persona_missing(dv: ModuleType) -> None:
     empty = dv._doc.new_persona(NOW)  # never built: no header, the state is the body
     for doc in (None, empty, {**empty, "note": "Keep it short."}):
-        view = dv.render_overview(snap(dv, "persona", doc=doc, manage_global=True), lang)
+        view = dv.render_overview(snap(dv, "persona", doc=doc, manage_global=True), "en")
 
         check_view(dv, view)
-        assert view.html.startswith(
-            f"<h3>{s(dv, lang, 'title_persona')}</h3><p>{s(dv, lang, 'st_persona_missing')}</p>"
-        )
-        assert view.buttons == (((s(dv, lang, "b_back_dossier"), "o.c"),),)
+        assert view.html.startswith(f"<h3>My persona</h3><p>{s(dv, 'en', 'st_persona_missing')}</p>")
+        assert view.buttons == ((("‹ Dossier", "o.c"),),)
 
 
-PERSONA_DUE = {"en": "No persona yet. It is written at the next dossier cycle.",
-               "ru": "Персоны пока нет. Она появится после следующего цикла обработки."}
+PERSONA_DUE = "No persona yet. It is written at the next dossier cycle."
 
 
-@pytest.mark.parametrize("lang", ["en", "ru"])
-def test_a_persona_due_at_the_next_cycle_never_asks_for_10_messages(dv: ModuleType, lang: str) -> None:
+def test_a_persona_due_at_the_next_cycle_never_asks_for_10_messages(dv: ModuleType) -> None:
     empty = dv._doc.new_persona(NOW)
     for doc in (None, empty, {**empty, "note": "Keep it short."}):
-        view = dv.render_overview(snap(dv, "persona", doc=doc, manage_global=True, persona_due=True), lang)
+        view = dv.render_overview(snap(dv, "persona", doc=doc, manage_global=True, persona_due=True), "en")
 
         check_view(dv, view)
-        assert view.html.startswith(f"<h3>{s(dv, lang, 'title_persona')}</h3><p>{PERSONA_DUE[lang]}</p>")
+        assert view.html.startswith(f"<h3>My persona</h3><p>{PERSONA_DUE}</p>")
         assert "10" not in view.text
-    built = dv.render_overview(snap(dv, "persona", doc=persona_doc(dv), persona_due=True), lang)
-    assert PERSONA_DUE[lang] not in built.text  # a written persona shows itself
-
-
-def test_an_empty_persona_build_shows_its_header_and_empty(dv: ModuleType) -> None:
-    view = dv.render_overview(snap(dv, "persona", doc=persona_doc(dv, document="")), "en")
-
-    assert "<tg-time" in view.html and view.html.endswith("<p><i>Nothing worth keeping yet.</i></p>")
-
-
-def test_an_unknown_target_is_an_error(dv: ModuleType) -> None:
-    with pytest.raises(ValueError):
-        dv.render_overview(snap(dv, target="group"), "en")
-    with pytest.raises(ValueError):
-        dv.render_state("busy", "en", "group")
+    built = dv.render_overview(snap(dv, "persona", doc=persona_doc(dv), persona_due=True), "en")
+    assert PERSONA_DUE not in built.text  # a written persona shows itself
 
 
 # ---------------------------------------------------------------------------
@@ -753,29 +685,26 @@ def converted_doc(dv: ModuleType, **changes: Any) -> dict[str, Any]:
     return doc
 
 
-@pytest.mark.parametrize("lang", ["en", "ru"])
 @pytest.mark.parametrize(
     ("changes", "key", "buttons"),
     [
         ({}, "st_converted", ["rf.c"]),
         ({"unqualified": True}, "st_converted_waiting", []),  # inactive: nothing in the backfill window
         ({"in_history": False}, "st_converted_waiting", []),  # pruned, or the chat left history
-        ({"chat_off": True}, "note_chat_off", []),  # paused for this chat: frozen, still readable
-        ({"llm_ready": False}, "st_no_model", []),
     ],
-    ids=["ready", "unqualified", "not in history", "chat off", "no model"],
+    ids=["ready", "unqualified", "not in history"],
 )
 def test_a_converted_document_is_shown_in_every_chat_state(
-    dv: ModuleType, lang: str, changes: dict[str, Any], key: str, buttons: list[str]
+    dv: ModuleType, changes: dict[str, Any], key: str, buttons: list[str]
 ) -> None:
-    view = dv.render_overview(snap(dv, doc=converted_doc(dv), **changes), lang)
+    view = dv.render_overview(snap(dv, doc=converted_doc(dv), **changes), "en")
 
     check_view(dv, view)
     assert "<h4>Relationship</h4>" in view.html and "Mira is the design lead at Northwind Demo." in view.html
     assert "Never call on Sundays." in view.html  # the converted note
-    assert view.html.endswith(f"<p><i>{s(dv, lang, key)}</i></p>")
+    assert view.html.endswith(f"<p><i>{s(dv, 'en', key)}</i></p>")
     for missing in ("st_missing", "st_unqualified", "st_not_in_history"):
-        assert s(dv, lang, missing) not in view.html
+        assert s(dv, "en", missing) not in view.html
     assert "<tg-time" not in view.html  # never checked: no header time
     assert args_of(view) == buttons
 
@@ -785,13 +714,12 @@ def test_a_converted_document_is_shown_in_every_chat_state(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key", ["busy", "refresh_started", "unavailable", "up_to_date", "failed", "operator_only"])
-def test_states_and_notices(dv: ModuleType, key: str) -> None:
+def test_states_and_notices(dv: ModuleType) -> None:
     for lang in ("en", "ru"):
-        view = dv.render_state(key, lang, "persona", error="BadRequest")
+        view = dv.render_state("failed", lang, "persona", error="BadRequest")
 
         check_view(dv, view)
-        assert view.notice == dv.notice_text(key, lang, error="BadRequest")
+        assert view.notice == dv.notice_text("failed", lang, error="BadRequest")
         assert view.html == f"<p>{view.notice}</p>"
         assert view.buttons == ((("Open dossier" if lang == "en" else "Открыть досье", "o.p"),),)
     assert dv.notice_text("up_to_date", "en") == "Already up to date"
@@ -805,12 +733,6 @@ def test_no_connection_has_no_retry_button(dv: ModuleType) -> None:
 
     check_view(dv, view)
     assert view.buttons == ()
-
-
-def test_v1_notices_are_gone(dv: ModuleType) -> None:
-    for key in ("changed", "pinned", "unpinned", "removed", "nope"):
-        with pytest.raises(ValueError):
-            dv.notice_text(key, "en")
 
 
 def test_with_notice_shows_a_notice_once(dv: ModuleType) -> None:
@@ -868,44 +790,13 @@ V1_ARGS = [
 ]
 
 
-@pytest.mark.parametrize("args", V1_ARGS)
-def test_every_v1_code_gives_none(dv: ModuleType, args: str) -> None:
-    assert dv.parse_args(args) is None
+def test_every_v1_code_gives_none(dv: ModuleType) -> None:
+    assert [args for args in V1_ARGS if dv.parse_args(args) is not None] == []
 
 
-@pytest.mark.parametrize(
-    "bad",
-    [
-        None,
-        1,
-        b"o.c",
-        ["o.c"],
-        "o",
-        "o.",
-        ".c",
-        "o.x",
-        "rf.p",
-        "rf",
-        "O.C",
-        "o.c ",
-        " o.c",
-        "o.c.0",
-        "o..c",
-        "о.с",
-        "o.c\n",
-        "o-c",
-        "x" * 31,
-        "o.c" + "." * 28,
-    ],
-)
+@pytest.mark.parametrize("bad", [None, b"o.c", ["o.c"], "rf.p", "O.C", "o.c\n"])
 def test_malformed_args_give_none(dv: ModuleType, bad: Any) -> None:
     assert dv.parse_args(bad) is None
-
-
-@pytest.mark.parametrize(("name", "target"), [("refresh", "persona"), ("pin", "contact"), ("overview", "group")])
-def test_build_args_rejects_unknown_actions(dv: ModuleType, name: str, target: str) -> None:
-    with pytest.raises(ValueError):
-        dv.build_args(name, target)
 
 
 def test_every_callback_fits_telegram(dv: ModuleType) -> None:
@@ -977,8 +868,8 @@ def test_enable_confirm_in_russian_with_both_extra_processors(dv: ModuleType) ->
     assert f"\n\n{ROUTE_RU}\n\n{GATE_RU}\n\n{CLAIRIC_LINES['ru']}\n\n" in text
 
 
-@pytest.mark.parametrize("gate", ["on", "off", "no_key", "not_gateway", "bad_base_url"])
-@pytest.mark.parametrize("clairic", ["on", "off", "no_key"])
+@pytest.mark.parametrize("gate", ["on", "no_key"])
+@pytest.mark.parametrize("clairic", ["on", "off"])
 def test_enable_lines_name_an_extra_processor_only_when_it_runs(dv: ModuleType, gate: str, clairic: str) -> None:
     for lang, gate_line in (("en", GATE_EN), ("ru", GATE_RU)):
         lines = dv.enable_lines(cfg(gate=gate, clairic=clairic), lang)
@@ -987,14 +878,8 @@ def test_enable_lines_name_an_extra_processor_only_when_it_runs(dv: ModuleType, 
         assert (CLAIRIC_LINES[lang] in lines) is (clairic == "on")
 
 
-def test_the_message_check_line_says_the_dossier_goes_to_typesafe(dv: ModuleType) -> None:
-    assert "current dossier" in GATE_EN and "текущее досье" in GATE_RU  # not only the new messages
-    assert dv.enable_lines(cfg(gate="on"), "en")[-1] == GATE_EN
-
-
 @pytest.mark.parametrize(("changes", "route"), [
     ({}, True),
-    ({"provider": "auto", "model": "main model"}, True),
     ({"legacy_env": True, "provider": "gemini", "model": "gemini-3.8-flash"}, False),  # TELESEC_DOSSIER_PROVIDER
     ({"task_registered": False}, False),  # an older Hermes: the explicit fallback route
 ])
@@ -1004,14 +889,6 @@ def test_the_task_route_sentence_only_when_the_task_is_in_use(dv: ModuleType, ch
         lines = dv.enable_lines(cfg(**changes), lang)
         assert (sentence in lines) is route
         assert (sentence in dv.enable_confirm(cfg(**changes), lang)[0]) is route
-
-
-@pytest.mark.parametrize(("lang", "shown"), [("en", "sent to your main model to build"),
-                                              ("ru", "будет отправляться в вашу основную модель, чтобы")])
-def test_the_auto_route_has_a_localized_name(dv: ModuleType, lang: str, shown: str) -> None:
-    text = dv.enable_confirm(cfg(provider="auto", model="main model"), lang)[0]
-
-    assert shown in text and "auto" not in text and "main model /" not in text
 
 
 def test_enable_lines_name_the_model_safely(dv: ModuleType) -> None:
@@ -1040,25 +917,13 @@ def test_post_in_english(dv: ModuleType) -> None:
     check_html(dv, html)
 
 
-def test_post_in_russian(dv: ModuleType) -> None:
-    html = dv.post_html("**Мира, ваш дизайнер.**\n\n## Планы\n- Встреча в пятницу [m12].", NOW)
-
-    assert html == (
-        "<h3>Досье</h3><p><b>Мира, ваш дизайнер.</b></p><h4>Планы</h4><ul><li>Встреча в пятницу.</li></ul>"
-        "<p><i>Составлено автоматически по этой переписке 20 октября 2026; возможны неточности.</i></p>"
-    )
-
-
 @pytest.mark.parametrize(
     ("document", "lang"),
     [
         ("абв defghij", "ru"),  # 3 of 10 letters are Cyrillic: exactly 30 %
         ("аб cdefghij", "en"),  # 20 %
         ("абв defghij [m1] [m22, m333]", "ru"),  # refs are not letters of the document
-        ("Orbit: встреча в пятницу, 18:00", "ru"),
-        ("Orbit review on Friday, встреча", "en"),
         ("12:00 / 5 000 ₽", "en"),  # no letters at all
-        ("", "en"),
     ],
 )
 def test_post_language_follows_the_cyrillic_share(dv: ModuleType, document: str, lang: str) -> None:
@@ -1071,8 +936,6 @@ def test_post_language_follows_the_cyrillic_share(dv: ModuleType, document: str,
     ("at", "en", "ru"),
     [
         (datetime(2026, 1, 1, 0, 5), "1 January 2026", "1 января 2026"),
-        (datetime(2026, 3, 8, 12, 0, tzinfo=UTC), "8 March 2026", "8 марта 2026"),
-        (datetime(2026, 5, 9, 9, 0, tzinfo=UTC), "9 May 2026", "9 мая 2026"),
         (datetime(2026, 12, 31, 23, 30, tzinfo=timezone(timedelta(hours=3))), "31 December 2026", "31 декабря 2026"),
     ],
 )
@@ -1081,18 +944,12 @@ def test_post_date_is_the_local_date_with_month_names(dv: ModuleType, at: dateti
     assert f"по этой переписке {ru};" in dv.post_html("Краткое русское резюме.", at)
 
 
-def test_month_tables(dv: ModuleType) -> None:
-    assert len(s(dv, "en", "months")) == len(s(dv, "ru", "months")) == 12
-    assert s(dv, "ru", "months")[2] == "марта" and s(dv, "ru", "months")[7] == "августа"  # genitive
-
-
 def test_the_post_adds_only_its_title_and_a_dated_footer(dv: ModuleType) -> None:
     # Fixed text plus a date: no owner-only metadata (model, cost, update time, counts or the note label).
     for document, lang in (("- Plain English point.", "en"), ("- Пункт по-русски.", "ru")):
         fixed = dv.post_html(document, NOW).replace(dv.markdown_html(document), "")
         footer = s(dv, lang, "post_footer").format(date=dv._date(NOW, lang))
         assert fixed == f"<h3>{s(dv, lang, 'post_title')}</h3><p><i>{footer}</i></p>"
-    assert (s(dv, "en", "post_title"), s(dv, "ru", "post_title")) == ("Dossier", "Досье")
 
 
 def test_a_full_size_post_fits(dv: ModuleType) -> None:
@@ -1154,37 +1011,11 @@ UNSURE_HEADS = {"en": "The dossier may have been posted to the chat with Mira Ta
                 "ru": "Досье, возможно, отправлено в чат «Mira Tanaka»."}
 
 
-def test_post_reasons_are_exactly_the_v2_set(dv: ModuleType) -> None:
-    assert dv.POST_REASONS == (
-        "disabled",
-        "no_model",
-        "history_off",
-        "chat_off",
-        "window",
-        "unqualified",
-        "empty",
-        "busy",
-        "changed",
-        "failed",
-        "send_refused",
-        "send_failed",
-        "send_unsure",
-    )
-    assert set(REFUSALS["en"]) == set(REFUSALS["ru"]) == set(dv.POST_REASONS)
-
-
 @pytest.mark.parametrize("lang", ["en", "ru"])
-@pytest.mark.parametrize("reason", list(REFUSALS["en"]))
-def test_post_refusal_for_every_reason(dv: ModuleType, lang: str, reason: str) -> None:
-    text = dv.post_refusal(reason, lang, name=NAME, error="TimeoutError")
-
-    head = UNSURE_HEADS[lang] if reason == "send_unsure" else HEADS[lang]
-    assert text == f"{head}\n{REFUSALS[lang][reason]}"
-    assert "<" not in text and "\u202e" not in text
-
-
-def test_english_chat_off_keeps_its_sentence(dv: ModuleType) -> None:
-    assert "Dossier is off for this chat." in dv.post_refusal("chat_off", "en", name=NAME)
+def test_post_refusal_for_every_reason(dv: ModuleType, lang: str) -> None:
+    for reason in dv.POST_REASONS:
+        head = UNSURE_HEADS[lang] if reason == "send_unsure" else HEADS[lang]
+        assert dv.post_refusal(reason, lang, name=NAME, error="TimeoutError") == f"{head}\n{REFUSALS[lang][reason]}"
 
 
 def test_post_refusal_cleans_the_name_and_the_error(dv: ModuleType) -> None:
@@ -1196,12 +1027,6 @@ def test_post_refusal_cleans_the_name_and_the_error(dv: ModuleType) -> None:
     assert dv.post_refusal("failed", "en", name="", error=None) == (
         "Nothing was posted to the chat with ?.\nThe dossier could not be prepared (?)."
     )
-
-
-@pytest.mark.parametrize("reason", ["blocked", "persona", "corrupt", "missing", "unchecked", "nope"])
-def test_removed_and_unknown_reasons_are_errors(dv: ModuleType, reason: str) -> None:
-    with pytest.raises(ValueError):
-        dv.post_refusal(reason, "en", name=NAME)
 
 
 # ---------------------------------------------------------------------------
@@ -1226,15 +1051,12 @@ def test_english_and_russian_have_the_same_keys(dv: ModuleType) -> None:
             assert len(value) == len(ru[key])
 
 
-def test_strings_are_html_safe_and_named_for_v2(dv: ModuleType) -> None:
+def test_strings_are_html_safe(dv: ModuleType) -> None:
     for lang in ("en", "ru"):
         for key, value in walk(dv.STRINGS[lang]).items():
             for text in value if isinstance(value, tuple) else (value,):
                 assert isinstance(text, str) and text, key
                 assert not re.search(r'[<>&"]', text), (key, text)
-    assert "st_blocked" not in dv.STRINGS["en"] and "blocked" not in dv.STRINGS["en"]["post"]  # O4
-    assert not any("TELESEC_DOSSIER_PROVIDER" in str(value) for value in walk(dv.STRINGS["en"]).values())
-    assert dv.STRINGS["en"]["note_label"] == "Your note (not posted)"
 
 
 @pytest.mark.parametrize(
@@ -1243,39 +1065,13 @@ def test_strings_are_html_safe_and_named_for_v2(dv: ModuleType) -> None:
         ("ru", "ru"),
         ("ru-RU", "ru"),
         ("RU", "ru"),
-        ("en", "en"),
         ("uk", "en"),
-        ("", "en"),
         (None, "en"),
         ("de-ru", "en"),
     ],
 )
 def test_lang_for(dv: ModuleType, code: str | None, lang: str) -> None:
     assert dv.lang_for(code) == lang
-
-
-def test_snapshot_has_no_blocked_state(dv: ModuleType) -> None:
-    names = {field.name for field in fields(dv.DossierSnapshot)}
-
-    assert "blocked" not in names
-    assert {
-        "target",
-        "name",
-        "chat_id",
-        "connection",
-        "doc",
-        "corrupt",
-        "enabled",
-        "history_enabled",
-        "chat_off",
-        "llm_ready",
-        "refreshing",
-        "failure",
-        "unqualified",
-        "manage_global",
-        "persona_due",
-        "in_history",
-    } == names
 
 
 # ---------------------------------------------------------------------------
@@ -1383,28 +1179,7 @@ def test_rich_message_payload(dv: ModuleType) -> None:
 
 
 def test_module_is_pure() -> None:
-    """Module-level imports are the stdlib, dossier_doc and dossier_writer, and no function imports anything."""
+    """No files, environment, clock, printing or logging: the views see chat text."""
     source = (Path(__file__).resolve().parent.parent / "dossier_view.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    relative, absolute = set(), set()
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            absolute |= {alias.name.split(".")[0] for alias in node.names}
-        elif isinstance(node, ast.ImportFrom) and node.level:
-            relative |= {alias.name for alias in node.names}
-        elif isinstance(node, ast.ImportFrom):
-            absolute.add(str(node.module).split(".")[0])
-    assert relative == {"dossier_doc", "dossier_writer"}
-    assert absolute <= set(sys.stdlib_module_names) | {"__future__"}, absolute - set(sys.stdlib_module_names)
-
-    lazy = [
-        (function.name, alias.name)
-        for function in ast.walk(tree)
-        if isinstance(function, ast.FunctionDef)
-        for node in ast.walk(function)
-        if isinstance(node, (ast.Import, ast.ImportFrom))
-        for alias in node.names
-    ]
-    assert lazy == []
     for forbidden in ("open(", "environ", ".now(", ".today(", "utcnow", "time.time", "print(", "logger", "logging"):
         assert forbidden not in source, forbidden

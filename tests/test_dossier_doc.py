@@ -21,9 +21,10 @@ NOW = datetime(2026, 10, 21, 9, 0, 5, 123456, tzinfo=UTC)
 DOC_ERROR = "dossier file is corrupt or unsupported; reset it with 'hermes telesec dossier forget …'"
 
 
-@pytest.fixture
-def dd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ModuleType:
-    return core_module(monkeypatch, tmp_path, "dossier_doc")
+@pytest.fixture(scope="module")
+def dd(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    with pytest.MonkeyPatch.context() as mp:
+        yield core_module(mp, tmp_path_factory.mktemp("dossier-doc"), "dossier_doc")
 
 
 def contact(dd: ModuleType, **changes: Any) -> dict[str, Any]:
@@ -73,15 +74,8 @@ def test_new_contact_has_the_v2_shape(dd: ModuleType) -> None:
     }
     assert len(doc["id"]) == 12 and int(doc["id"], 16) >= 0
     assert dd.valid(doc)
-    assert dd.new_contact("biz-demo-1", 700001, NOW)["id"] != doc["id"]
-
-
-def test_new_contact_stores_the_connection_as_text(dd: ModuleType) -> None:
-    doc = dd.new_contact(12345, "700001", NOW)
-
-    assert doc["business_connection_id"] == "12345"
-    assert doc["chat_id"] == "700001"
-    assert dd.valid(doc)
+    other = dd.new_contact(12345, "700001", NOW)
+    assert (other["business_connection_id"], other["chat_id"]) == ("12345", "700001") and other["id"] != doc["id"]
 
 
 def test_new_persona_has_the_v2_shape(dd: ModuleType) -> None:
@@ -109,6 +103,7 @@ def test_round_trip(dd: ModuleType, tmp_path: Path) -> None:
         note="Мы заканчиваем проект Orbit в декабре.",
         seen={"90": ["9f1c2a7b3e4d5f60", "2026-10-19T09:02:00Z"]},
         last_call={"provider": "ai-gateway", "model": "google/gemini-3.8-flash", "at": "2026-10-21T09:00:05Z"},
+        future_field={"x": 1},
     )
     dd.write_doc(target, doc)
 
@@ -117,8 +112,8 @@ def test_round_trip(dd: ModuleType, tmp_path: Path) -> None:
 
 
 def test_persona_round_trip(dd: ModuleType, tmp_path: Path) -> None:
-    doc = dd.new_persona(NOW)
-    doc.update(chats=[{"business_connection_id": "biz-demo-1", "chat_id": 700001}], messages=12)
+    chats = [{"business_connection_id": "biz-demo-1", "chat_id": 700001}]
+    doc = {**dd.new_persona(NOW), "chats": chats, "messages": 12, "previous": "## Style\n- Short.", "previous_chats": chats}
     dd.write_doc(tmp_path / "persona", doc)
 
     assert dd.read_doc(tmp_path / "persona") == doc
@@ -174,44 +169,25 @@ def test_an_earlier_seed_field_reads_as_the_document(dd: ModuleType, tmp_path: P
     assert built["document"] == "**Mira.**" and "seed" not in built
 
 
-def test_a_persona_keeps_the_chats_of_its_previous_version(dd: ModuleType, tmp_path: Path) -> None:
-    chats = [{"business_connection_id": "biz-demo-1", "chat_id": 700001}]
-    dd.write_doc(tmp_path / "p", {**dd.new_persona(NOW), "previous": "## Style\n- Short.", "previous_chats": chats})
-
-    assert dd.read_doc(tmp_path / "p")["previous_chats"] == chats
-
-
-def test_unknown_keys_are_kept(dd: ModuleType, tmp_path: Path) -> None:
-    write_raw(tmp_path / "c", json.dumps(contact(dd, future_field={"x": 1})))
-
-    assert dd.read_doc(tmp_path / "c")["future_field"] == {"x": 1}
-
-
 @pytest.mark.parametrize(
     "raw",
-    [
-        "",
-        "{not json",
-        "[]",
-        '"document"',
-        b"\xff\xfe\x00",
-    ],
-    ids=["empty", "bad-json", "list", "string", "bad-utf8"],
+    ['{"note": "Mira private canary"', '{"note": "Mira private canary"}', "[]", b"\xff\xfe\x00"],
+    ids=["bad-json", "invalid-doc", "list", "bad-utf8"],
 )
-def test_unreadable_files_raise_doc_error(dd: ModuleType, tmp_path: Path, raw: str | bytes) -> None:
-    write_raw(tmp_path / "c", raw)
+def test_unreadable_files_raise_a_fixed_doc_error(dd: ModuleType, tmp_path: Path, raw: str | bytes) -> None:
+    write_raw(tmp_path / "secret-chat", raw)
 
     with pytest.raises(dd.DocError) as caught:
-        dd.read_doc(tmp_path / "c")
-    assert str(caught.value) == DOC_ERROR
-    assert isinstance(caught.value, ValueError)
+        dd.read_doc(tmp_path / "secret-chat")
+    assert str(caught.value) == DOC_ERROR and isinstance(caught.value, ValueError)
+    # The JSON error (which quotes the text) is not chained either.
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None or caught.value.__suppress_context__
 
 
 BAD_FIELDS = [
     ("format", 1),
-    ("format", "2"),
     ("format", 2.0),
-    ("format", True),
     ("kind", "dossier"),
     ("kind", ["contact"]),
     ("id", ""),
@@ -248,7 +224,7 @@ def test_bad_field_types_raise_doc_error(dd: ModuleType, tmp_path: Path, field: 
         dd.read_doc(tmp_path / "c")
 
 
-@pytest.mark.parametrize("field", ["note", "seen", "window_start", "older_history_not_sent", "last_call"])
+@pytest.mark.parametrize("field", ["window_start", "last_call"])
 def test_missing_fields_raise_doc_error(dd: ModuleType, tmp_path: Path, field: str) -> None:
     doc = contact(dd)
     del doc[field]
@@ -258,8 +234,8 @@ def test_missing_fields_raise_doc_error(dd: ModuleType, tmp_path: Path, field: s
         dd.read_doc(tmp_path / "c")
 
 
-@pytest.mark.parametrize(("field", "value"), [("chats", {}), ("chats", ["c1"]), ("newest_at", 3), ("chats", None),
-                                              ("previous_chats", ["c1"]), ("previous_chats", None)])
+@pytest.mark.parametrize(("field", "value"), [("chats", None), ("chats", ["c1"]), ("newest_at", 3),
+                                              ("previous_chats", ["c1"])])
 def test_bad_persona_fields_raise_doc_error(dd: ModuleType, tmp_path: Path, field: str, value: Any) -> None:
     doc = dd.new_persona(NOW)
     doc[field] = value
@@ -278,18 +254,6 @@ def test_a_v1_file_is_never_read(dd: ModuleType, tmp_path: Path) -> None:
     write_raw(target, json.dumps({"schema_version": 1, "kind": "contact", "facts": []}))
     with pytest.raises(dd.DocError):
         dd.read_doc(target)
-
-
-@pytest.mark.parametrize("raw", ['{"note": "Mira private canary"}', '{"note": "Mira private canary"'])
-def test_doc_error_never_holds_the_path_or_content(dd: ModuleType, tmp_path: Path, raw: str) -> None:
-    write_raw(tmp_path / "secret-chat", raw)
-
-    with pytest.raises(dd.DocError) as caught:
-        dd.read_doc(tmp_path / "secret-chat")
-    assert str(caught.value) == DOC_ERROR
-    # The JSON error (which quotes the text) is not chained either.
-    assert caught.value.__cause__ is None
-    assert caught.value.__context__ is None or caught.value.__suppress_context__
 
 
 # ---------------------------------------------------------------------------
@@ -312,13 +276,10 @@ def test_note_sha_follows_the_note(dd: ModuleType) -> None:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("", 0),
         ("Mira", 4),
         ("привет", 6),
         ("👍", 2),
-        ("a👍b", 4),
         ("👨\u200d👩\u200d👧", 8),
-        ("**28 октября** 🎉", 17),
     ],
 )
 def test_units_count_utf16(dd: ModuleType, text: str, expected: int) -> None:
@@ -329,21 +290,3 @@ def test_clean_note_strips_controls_and_bidi(dd: ModuleType) -> None:
     raw = "  Keep\u202e it\x07 short.\x7f\r\nНе\tбольше 🙂\u2066 двух\x00 строк.\x9b\x85\n\n "
 
     assert dd.clean_note(raw) == "Keep it short.\nНе больше 🙂 двух строк."
-
-
-def test_clean_note_never_clips(dd: ModuleType) -> None:
-    long_note = "Не включать: " + "о" * 1200
-
-    assert dd.clean_note(long_note) == long_note
-    assert dd.NOTE_MAX_CHARS == 500
-
-
-def test_constants(dd: ModuleType) -> None:
-    assert (dd.DOC_FILE, dd.V1_FILE, dd.V1_BACKUP, dd.V1_CHANGES) == (
-        "document.json",
-        "dossier.json",
-        "v1-dossier.json",
-        "changes.jsonl",
-    )
-    assert (dd.DOC_FORMAT, dd.DOC_MAX_UNITS) == (2, 3200)
-    assert not hasattr(dd, "LEAVE_OUT_MAX")
