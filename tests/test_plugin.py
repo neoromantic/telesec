@@ -1513,10 +1513,11 @@ def _raw_first_setup(*, from_user_id: int = 2000, caption: str | None = None, ca
 async def test_incoming_raw_reply_is_visible_before_cleanup_then_edited_in_place(plugin, caplog):
     _message, event, bot, gateway = _raw_first_setup()
     seen_while_pending: list[list[str]] = []
-    release = asyncio.Event()
+    release, started = asyncio.Event(), asyncio.Event()
 
     async def cleanup(_text):
         seen_while_pending.append([call["text"] for call in bot.delivered_calls])
+        started.set()
         await release.wait()
         return RAW_FIRST_CLEAN
 
@@ -1524,8 +1525,7 @@ async def test_incoming_raw_reply_is_visible_before_cleanup_then_edited_in_place
         event=event, gateway=gateway, transcribe_fn=lambda _path: {"success": True, "transcript": RAW_FIRST_RAW},
         cleanup_fn=cleanup,
     ))
-    while not seen_while_pending:
-        await asyncio.sleep(0)
+    await started.wait()
     release.set()
     with caplog.at_level("INFO"):
         await task

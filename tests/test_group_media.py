@@ -886,6 +886,17 @@ async def test_at_most_two_group_transcriptions_run_at_once(plugin, group_app, m
     wire(plugin, app, monkeypatch)
     lock, release, entered = threading.Lock(), threading.Event(), threading.Semaphore(0)
     running = [0, 0]  # now, peak
+    all_queued, queued = asyncio.Event(), [0, 0]  # arrived, acquired
+    acquire = plugin._GROUP_TRANSCRIPTIONS.acquire
+
+    async def counted_acquire():
+        queued[0] += 1
+        if queued[0] == 4:
+            all_queued.set()
+        await acquire()
+        queued[1] += 1
+
+    monkeypatch.setattr(plugin._GROUP_TRANSCRIPTIONS, "acquire", counted_acquire)
 
     def transcribe(_path):
         with lock:
@@ -902,8 +913,8 @@ async def test_at_most_two_group_transcriptions_run_at_once(plugin, group_app, m
         await app.process_update(group_update(app, update_id=number + 1, message_id=80 + number))
     assert await asyncio.to_thread(entered.acquire, timeout=5)
     assert await asyncio.to_thread(entered.acquire, timeout=5)
-    await asyncio.sleep(0.2)
-    assert running == [2, 2]
+    await asyncio.wait_for(all_queued.wait(), 5)
+    assert queued == [4, 2] and running == [2, 2]
     release.set()
     await deliver(plugin, app)
 
@@ -916,16 +927,19 @@ async def test_passive_transcript_does_not_wait_for_a_busy_request(plugin, group
     app, request = group_app
     Boundary(monkeypatch, plugin)
     adapter, _core = wire(plugin, app, monkeypatch)
-    adapter.handle_gate = asyncio.Event()
+    adapter.handle_gate, handling = asyncio.Event(), asyncio.Event()
+    handle = adapter.handle_message
 
+    async def handle_message(event):
+        handling.set()
+        await handle(event)
+
+    adapter.handle_message = handle_message
     await app.process_update(group_update(app, reply_to_message=bot_message()))
-    while not adapter.events:
-        await asyncio.sleep(0.01)
+    busy = set(plugin._pending_tasks)
+    await asyncio.wait_for(handling.wait(), 5)
     await app.process_update(group_update(app, update_id=2, message_id=78))
-    for _ in range(200):
-        if len(request.sends()) == 2:
-            break
-        await asyncio.sleep(0.01)
+    await asyncio.wait_for(asyncio.gather(*plugin._pending_tasks - busy), 5)
 
     assert [reply_id(params) for params in request.sends()] == [None, 78]
     adapter.handle_gate.set()
@@ -956,7 +970,7 @@ async def test_cancelled_work_removes_media_only_after_the_stt_thread_ends(plugi
     for _ in range(2):
         for task in tasks:
             task.cancel()
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         assert paths[0].exists()
     release.set()
     await asyncio.gather(*tasks, return_exceptions=True)

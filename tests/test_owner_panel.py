@@ -984,11 +984,11 @@ async def test_slow_section_times_out_after_the_callback_is_answered(plugin, mod
 
     async def render(ctx):
         answered_before_render.append(list(bot.answers))
-        await asyncio.sleep(5)
+        await asyncio.Event().wait()
 
     panel.register_section("stats", "Stats", render)
 
-    assert await dispatch(plugin, callback_update("tb:s:991:stats"), bot) is True
+    assert await asyncio.wait_for(dispatch(plugin, callback_update("tb:s:991:stats"), bot), 5) is True
 
     assert answered_before_render == [[{"callback_query_id": "query-1", "text": "Stats"}]]
     assert last_edit(bot)[0] == "chat 991\nSection unavailable."
