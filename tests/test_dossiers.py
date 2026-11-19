@@ -8,7 +8,6 @@ Races, failures, the message check, the persona rules and the forget contract ar
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import itertools
 import json
@@ -54,6 +53,7 @@ from dossier_helpers import (
     seed,
     snapshot_history_tree,
     snapshot_tree,
+    spy_switch_checks,
     spy_worker_cycles,
     wait_until,
     wait_worker_cycle,
@@ -822,6 +822,7 @@ async def test_disabled_worker_idles_without_cycle_call_or_write(
     monkeypatch.setattr(ds, "INITIAL_DELAY_SECONDS", 0)
     monkeypatch.setattr(ds, "DISABLED_POLL_SECONDS", 0.02)  # many switch checks during the test
     outcomes = spy_worker_cycles(monkeypatch, ds)
+    checks = spy_switch_checks(monkeypatch, ds)
     fake = FakeLlm()
     try:
         assert ds.ensure_worker_started() is False  # no facade bound: nothing starts
@@ -831,7 +832,7 @@ async def test_disabled_worker_idles_without_cycle_call_or_write(
         assert ds.ensure_worker_started() is True
         threads = live_worker_threads()
         assert len(ds._WORKERS) == 1 and len(threads) == 1
-        await asyncio.sleep(0.3)
+        assert wait_until(lambda: len(checks) >= 3, timeout=10), checks
         worker = next(iter(ds._WORKERS.values()))
         assert threads[0].is_alive() and not worker.cycle_done.is_set()
         assert outcomes == [] and fake.calls == []
@@ -1028,14 +1029,15 @@ async def test_switch_on_wakes_the_idle_worker_whose_cycle_builds_contacts_and_t
     monkeypatch.setattr(ds, "INITIAL_DELAY_SECONDS", 0)
     monkeypatch.setattr(ds, "DISABLED_POLL_SECONDS", 3600)  # only a wake ends the idle wait
     outcomes = spy_worker_cycles(monkeypatch, ds)
+    checks = spy_switch_checks(monkeypatch, ds)
     fake = FakeLlm()
     ds.bind_llm(fake)
     try:
         connect_gateway(plugin)
         threads = live_worker_threads()
         assert len(threads) == 1
-        await asyncio.sleep(0.2)
-        assert outcomes == [] and fake.calls == []
+        assert wait_until(lambda: checks, timeout=10)  # the worker saw the switch off and idles
+        assert checks == [False] and outcomes == [] and fake.calls == []
 
         assert ds.set_enabled(True, via="telegram")["changed"] is True
         assert ds.wake_worker() is True
@@ -1091,18 +1093,18 @@ async def test_wake_while_enabled_never_causes_back_to_back_cycles(
     ds = dossiers
     await two_sided(plug, 5564, "NOBURST")
     monkeypatch.setattr(ds, "INITIAL_DELAY_SECONDS", 0)
-    monkeypatch.setattr(ds, "DISABLED_POLL_SECONDS", 0.02)  # the interval wait re-reads the switch often
+    monkeypatch.setattr(ds, "DISABLED_POLL_SECONDS", 3600)  # only a wake makes the interval wait re-read the switch
     outcomes = spy_worker_cycles(monkeypatch, ds)
+    checks = spy_switch_checks(monkeypatch, ds)
     fake = FakeLlm()
     ds.bind_llm(fake)
     connect_gateway(plug)
     wait_worker_cycle(ds, timeout=10)
     assert outcomes == ["completed"]
-    for _ in range(5):
+    for woken in range(1, 6):
         assert ds.set_enabled(True, via="telegram")["changed"] is False
         assert ds.wake_worker() is True
-        await asyncio.sleep(0.05)
-    await asyncio.sleep(0.2)
+        assert wait_until(lambda woken=woken: len(checks) > woken, timeout=10), checks  # the wake re-read the switch
     assert outcomes == ["completed"]  # the next cycle still waits for the 30 min interval
     assert len(fake.calls) == 1
 
@@ -1136,6 +1138,7 @@ async def test_disabling_stops_worker_cycles_and_enabling_resumes(
     # A 60 ms interval, so a worker that is on keeps cycling during the test.
     monkeypatch.setattr(ds, "load_config", lambda: dataclasses.replace(real_config(), interval_minutes=0.001))
     outcomes = spy_worker_cycles(monkeypatch, ds)
+    checks = spy_switch_checks(monkeypatch, ds)
     fake = FakeLlm()
     ds.bind_llm(fake)
     connect_gateway(plug)
@@ -1143,9 +1146,9 @@ async def test_disabling_stops_worker_cycles_and_enabling_resumes(
 
     ds.set_enabled(False, via="telegram")
     ds.wake_worker()
-    await asyncio.sleep(0.2)  # a cycle that was already running may finish
-    settled = len(outcomes)
-    await asyncio.sleep(0.5)
+    assert wait_until(lambda: not checks[-1], timeout=10)  # a cycle that was already running has finished
+    settled, off = len(outcomes), len(checks)
+    assert wait_until(lambda: len(checks) >= off + 3, timeout=10), checks  # several polls while off
     assert len(outcomes) == settled, outcomes[settled:]
     assert len(live_worker_threads()) == 1  # still running, only idle
     calls = len(fake.calls)
@@ -1166,13 +1169,14 @@ async def test_switch_on_after_off_skips_the_rest_of_the_interval(
     monkeypatch.setattr(ds, "INITIAL_DELAY_SECONDS", 0)
     monkeypatch.setattr(ds, "DISABLED_POLL_SECONDS", 0.02)  # the default 30 min interval stays
     outcomes = spy_worker_cycles(monkeypatch, ds)
+    checks = spy_switch_checks(monkeypatch, ds)
     ds.bind_llm(FakeLlm())
     connect_gateway(plug)
     assert wait_until(lambda: outcomes == ["completed"], timeout=10), outcomes  # the next one is due in 30 min
 
     ds.set_enabled(False, via="telegram")
     ds.wake_worker()
-    await asyncio.sleep(0.2)  # several polls while off
+    assert wait_until(lambda: checks[-2:] == [False, False], timeout=10), checks  # several polls while off
     assert outcomes == ["completed"]
 
     ds.set_enabled(True, via="telegram")
