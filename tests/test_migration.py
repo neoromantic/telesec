@@ -92,16 +92,17 @@ def test_settings_form_and_environment_overrides(plugin, monkeypatch):
     ctx = SimpleNamespace(llm=None, get_config=legacy.get, register_telegram_handler=Mock(), register_hook=Mock(),
                           register_cli_command=Mock(), register_skill=Mock())
     plugin.register(ctx)
+    agent_enable = plugin._history_support.get_config("agent_enable", False)
     assert plugin._history_support.history_config_from_env().enabled
     assert plugin._dossier_support.load_config().enabled
     assert plugin._cleanup_style() == "enriched"
-    assert plugin._truthy_env("TELESEC_AGENT_ENABLE", settings["agent_enable"])
+    assert plugin._truthy_env("TELESEC_AGENT_ENABLE", agent_enable)
     for key in ("HISTORY_ENABLE", "DOSSIER_ENABLE", "AGENT_ENABLE"):
         monkeypatch.setenv(f"TELESEC_{key}", "0")
     monkeypatch.setenv("TELESEC_CLEANUP_STYLE", "conservative")
     assert plugin._history_support.history_config_from_env().enabled  # the stored switches, not the variables
     assert plugin._dossier_support.load_config().enabled
-    assert not plugin._truthy_env("TELESEC_AGENT_ENABLE", settings["agent_enable"])
+    assert not plugin._truthy_env("TELESEC_AGENT_ENABLE", agent_enable)
     assert plugin._cleanup_style() == "conservative"
     legacy["history_enable"] = False
     plugin.register(ctx)

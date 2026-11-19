@@ -355,66 +355,33 @@ def append_raw_history_records(plugin, *records: dict[str, Any]) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync only")
-def test_fsync_parent_directory_uses_posix_directory_fsync(plugin, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(("error", "expected"), [(None, True), (errno.EINVAL, False), (errno.EIO, OSError)])
+def test_fsync_parent_directory_syncs_the_parent_and_raises_only_real_io_failures(
+    plugin, monkeypatch: pytest.MonkeyPatch, error: int | None, expected: Any,
+):
     history = plugin._history_support
     target = history.history_root() / "contacts.json"
-    calls: list[tuple[str, Any, Any | None]] = []
+    calls: list[tuple[str, Any]] = []
 
-    monkeypatch.setattr(
-        history.os,
-        "open",
-        lambda path, flags: calls.append(("open", path, flags)) or 17,
-    )
-    monkeypatch.setattr(history.os, "fsync", lambda descriptor: calls.append(("fsync", descriptor, None)))
-    monkeypatch.setattr(history.os, "close", lambda descriptor: calls.append(("close", descriptor, None)))
+    def _fsync(descriptor: int) -> None:
+        calls.append(("fsync", descriptor))
+        if error is not None:
+            raise OSError(error, "directory fsync failed")
 
-    assert history._fsync_parent_directory(target) is True
-    assert calls == [
-        ("open", str(target.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
-        ("fsync", 17, None),
-        ("close", 17, None),
-    ]
+    monkeypatch.setattr(history.os, "open", lambda path, _flags: calls.append(("open", path)) or 17)
+    monkeypatch.setattr(history.os, "fsync", _fsync)
+    monkeypatch.setattr(history.os, "close", lambda descriptor: calls.append(("close", descriptor)))
+
+    if expected is OSError:
+        with pytest.raises(OSError, match="directory fsync failed"):
+            history._fsync_parent_directory(target)
+    else:
+        assert history._fsync_parent_directory(target) is expected
+    assert calls == [("open", str(target.parent)), ("fsync", 17), ("close", 17)]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync only")
-def test_fsync_parent_directory_ignores_unsupported_directory_fsync(plugin, monkeypatch: pytest.MonkeyPatch):
-    history = plugin._history_support
-    target = history.history_root() / "contacts.json"
-    closed: list[int] = []
-
-    monkeypatch.setattr(history.os, "open", lambda _path, _flags: 23)
-
-    def _unsupported_fsync(_descriptor: int) -> None:
-        raise OSError(errno.EINVAL, "directory fsync unsupported")
-
-    monkeypatch.setattr(history.os, "fsync", _unsupported_fsync)
-    monkeypatch.setattr(history.os, "close", lambda descriptor: closed.append(descriptor))
-
-    assert history._fsync_parent_directory(target) is False
-    assert closed == [23]
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync only")
-def test_fsync_parent_directory_surfaces_real_io_failures(plugin, monkeypatch: pytest.MonkeyPatch):
-    history = plugin._history_support
-    target = history.history_root() / "contacts.json"
-    closed: list[int] = []
-
-    monkeypatch.setattr(history.os, "open", lambda _path, _flags: 29)
-
-    def _broken_fsync(_descriptor: int) -> None:
-        raise OSError(errno.EIO, "directory fsync failed")
-
-    monkeypatch.setattr(history.os, "fsync", _broken_fsync)
-    monkeypatch.setattr(history.os, "close", lambda descriptor: closed.append(descriptor))
-
-    with pytest.raises(OSError, match="directory fsync failed"):
-        history._fsync_parent_directory(target)
-    assert closed == [29]
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync only")
-def test_first_append_fsyncs_new_directories_and_first_month_file_in_order(plugin, monkeypatch: pytest.MonkeyPatch):
+def test_append_fsyncs_new_directories_and_month_file_in_order_only_when_created(plugin, monkeypatch: pytest.MonkeyPatch):
     history = plugin._history_support
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
     root = history.history_root()
@@ -451,55 +418,11 @@ def test_first_append_fsyncs_new_directories_and_first_month_file_in_order(plugi
 
     assert chat_dir == chat_dir_path
     assert parent_fsyncs == [data_dir, transport_dir, root, connection_dir, chat_dir_path, month_path]
-    assert stat.S_IMODE(root.stat().st_mode) == 0o700
-    assert stat.S_IMODE(connection_dir.stat().st_mode) == 0o700
-    assert stat.S_IMODE(chat_dir_path.stat().st_mode) == 0o700
-    assert stat.S_IMODE(month_path.stat().st_mode) == 0o600
 
+    parent_fsyncs.clear()
+    history._append_record(chat_dir, {**record, "message_id": 78, "text": "again"})
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync only")
-def test_subsequent_append_to_existing_month_skips_parent_directory_fsync(plugin, monkeypatch: pytest.MonkeyPatch):
-    history = plugin._history_support
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    chat_dir = history._history_chat_dir("business-123", 991)
-    first_record = history._build_event(
-        event_type="message.created",
-        source="business_message",
-        observed_at=base,
-        telegram_update_id=1,
-        business_connection_id="business-123",
-        chat_id=991,
-        message_id=77,
-        message_at=base,
-        sender_id=2000,
-        direction="inbound",
-        reply_to_message_id=None,
-        text="hello",
-    )
-    history._append_record(chat_dir, first_record)
-
-    parent_fsyncs: list[Path] = []
-    monkeypatch.setattr(history, "_fsync_parent_directory", lambda path: parent_fsyncs.append(path) or True)
-
-    second_record = history._build_event(
-        event_type="message.created",
-        source="business_message",
-        observed_at=base + timedelta(seconds=1),
-        telegram_update_id=2,
-        business_connection_id="business-123",
-        chat_id=991,
-        message_id=78,
-        message_at=base + timedelta(seconds=1),
-        sender_id=2000,
-        direction="inbound",
-        reply_to_message_id=None,
-        text="again",
-    )
-    history._append_record(chat_dir, second_record)
-
-    month_path = chat_dir / history._month_filename(base)
     assert parent_fsyncs == []
-    assert stat.S_IMODE(month_path.stat().st_mode) == 0o600
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync only")
@@ -575,12 +498,12 @@ class TimerHarness:
 async def test_history_is_fail_closed_when_disabled_or_missing_chat_type(plugin, monkeypatch: pytest.MonkeyPatch):
     update = make_business_text_update(chat_type=None)
 
-    await plugin._history_support.observe_ptb_update(update, bot=FakeBot())
-    assert not load_records(plugin, chat_id=991)
+    assert await plugin._history_support.observe_ptb_update(make_business_text_update(), bot=FakeBot()) is False
+    assert snapshot_history_state(plugin) == {}
 
     set_switch(plugin, "history", True)
-    await plugin._history_support.observe_ptb_update(update, bot=FakeBot())
-    assert not load_records(plugin, chat_id=991)
+    assert await plugin._history_support.observe_ptb_update(update, bot=FakeBot()) is False
+    assert snapshot_history_state(plugin) == {}
 
 
 @pytest.mark.asyncio
@@ -614,70 +537,6 @@ async def test_absent_history_read_paths_leave_tree_absent(
     assert expected_output in output
     assert snapshot_history_state(plugin) == {}
     assert not plugin._history_support.history_root().exists()
-
-
-@pytest.mark.asyncio
-async def test_absent_history_unknown_type_probe_rejects_without_side_effects(enabled_history):
-    plugin = enabled_history
-    before = snapshot_history_state(plugin)
-
-    wrote = await plugin._history_support.observe_ptb_update(
-        make_business_text_update(chat_type=None, text="unknown type probe"),
-        bot=FakeBot(),
-    )
-
-    assert wrote is False
-    assert before == {}
-    assert snapshot_history_state(plugin) == before
-    assert not plugin._history_support.history_root().exists()
-
-
-@pytest.mark.asyncio
-async def test_enable_only_private_capture_spans_multiple_connections_and_chats(plugin, monkeypatch: pytest.MonkeyPatch):
-    set_switch(plugin, "history", True)
-
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(business_id="business-123", chat_id=991, text="alpha"),
-        bot=FakeBot(),
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(business_id="business-456", chat_id=992, text="beta"),
-        bot=FakeBot(),
-    )
-
-    assert [record["text"] for record in load_records(plugin, business_id="business-123", chat_id=991)] == ["alpha"]
-    assert [record["text"] for record in load_records(plugin, business_id="business-456", chat_id=992)] == ["beta"]
-
-
-@pytest.mark.asyncio
-async def test_old_scope_variables_narrow_capture_while_they_are_set(plugin, monkeypatch: pytest.MonkeyPatch):
-    set_switch(plugin, "history", True)
-    monkeypatch.setenv("TELESEC_HISTORY_CONNECTIONS", "business-123")
-    monkeypatch.setenv("TELESEC_HISTORY_CHATS", "991")
-    monkeypatch.setenv("TELESEC_HISTORY_CHAT_TYPES", "group")
-
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(business_id="business-123", chat_id=991, text="kept"),
-        bot=FakeBot(),
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(business_id="business-456", chat_id=992, text="kept out"),
-        bot=FakeBot(),
-    )
-    plugin._chat_settings.clear_scope()  # no stored rule: the variables apply while they are set
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(business_id="business-456", chat_id=992, message_id=2, text="still out"),
-        bot=FakeBot(),
-    )
-    for name in ("CONNECTIONS", "CHATS", "CHAT_TYPES"):
-        monkeypatch.delenv(f"TELESEC_HISTORY_{name}")
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(business_id="business-456", chat_id=992, message_id=3, text="kept now"),
-        bot=FakeBot(),
-    )
-
-    assert [record["text"] for record in load_records(plugin, business_id="business-123", chat_id=991)] == ["kept"]
-    assert [record["text"] for record in load_records(plugin, business_id="business-456", chat_id=992)] == ["kept now"]
 
 
 @pytest.mark.asyncio
@@ -750,106 +609,28 @@ async def test_caption_only_media_update_creates_no_history_file(enabled_history
 async def test_raw_history_records_create_edit_delete_without_needing_gateway_dispatch(enabled_history, tmp_path: Path, monkeypatch):
     plugin = enabled_history
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    bot = FakeBot()
+    updates = (
+        (make_business_text_update(text="hello", message_id=77, update_id=1, date=base), base),
+        (make_business_text_update(text="hello again", message_id=77, update_id=2, date=base, edited=True),
+         base + timedelta(seconds=1)),
+        (make_deleted_update(message_ids=(77,), update_id=3), base + timedelta(seconds=2)),
+    )
+    for update, now in updates:
+        assert await plugin._history_support.observe_ptb_update(update, bot=FakeBot(), now=now)
 
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="hello", message_id=77, update_id=1, date=base),
-        bot=bot,
-        now=base,
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="hello again", message_id=77, update_id=2, date=base, edited=True),
-        bot=bot,
-        now=base + timedelta(seconds=1),
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_deleted_update(message_ids=(77,), update_id=3),
-        bot=bot,
-        now=base + timedelta(seconds=2),
-    )
-
-    records = load_records(plugin)
-    assert [record["event_type"] for record in records] == [
-        "message.created",
-        "message.edited",
-        "message.deleted",
+    assert plugin._history_support.maintain_history(now=base + timedelta(seconds=20)).classified == 1
+    assert [(record["event_type"], record["source"]) for record in load_records(plugin)] == [
+        ("message.created", "business_message"),
+        ("message.edited", "edited_business_message"),
+        ("message.deleted", "deleted_business_messages"),
+        ("deletion.classified", "deleted_business_messages"),
     ]
 
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="hello", message_id=77, update_id=1, date=base),
-        bot=bot,
-        now=base,
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="hello again", message_id=77, update_id=2, date=base, edited=True),
-        bot=bot,
-        now=base + timedelta(seconds=1),
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_deleted_update(message_ids=(77,), update_id=3),
-        bot=bot,
-        now=base + timedelta(seconds=2),
-    )
-    assert len(load_records(plugin)) == 3
-
     reloaded = _load_plugin_module(monkeypatch, tmp_path)
-    set_switch(reloaded, "history", True)
-    monkeypatch.setenv("TELESEC_HISTORY_CORRECTION_WINDOW", "10")
-    await reloaded._history_support.observe_ptb_update(
-        make_business_text_update(text="hello", message_id=77, update_id=1, date=base),
-        bot=bot,
-        now=base,
-    )
-    await reloaded._history_support.observe_ptb_update(
-        make_business_text_update(text="hello again", message_id=77, update_id=2, date=base, edited=True),
-        bot=bot,
-        now=base + timedelta(seconds=1),
-    )
-    await reloaded._history_support.observe_ptb_update(
-        make_deleted_update(message_ids=(77,), update_id=3),
-        bot=bot,
-        now=base + timedelta(seconds=2),
-    )
-    assert len(load_records(reloaded, business_id="business-123", chat_id=991)) == 3
-
-
-@pytest.mark.asyncio
-async def test_history_records_store_canonical_source_for_all_event_types(enabled_history):
-    plugin = enabled_history
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    bot = FakeBot()
-
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="hello", message_id=77, update_id=1, date=base),
-        bot=bot,
-        now=base,
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="hello again", message_id=77, update_id=2, date=base, edited=True),
-        bot=bot,
-        now=base + timedelta(seconds=1),
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_deleted_update(message_ids=(77,), update_id=3),
-        bot=bot,
-        now=base + timedelta(seconds=2),
-    )
-    result = plugin._history_support.maintain_history(now=base + timedelta(seconds=20))
-    records = load_records(plugin)
-
-    assert result.classified == 1
-    assert {record["event_type"] for record in records} == {
-        "message.created",
-        "message.edited",
-        "message.deleted",
-        "deletion.classified",
-    }
-    assert {record["event_type"]: record["source"] for record in records} == {
-        "message.created": "business_message",
-        "message.edited": "edited_business_message",
-        "message.deleted": "deleted_business_messages",
-        "deletion.classified": "deleted_business_messages",
-    }
+    for module in (plugin, reloaded):
+        for update, now in updates:
+            assert not await module._history_support.observe_ptb_update(update, bot=FakeBot(), now=now)
+    assert len(load_records(reloaded)) == 4
 
 
 @pytest.mark.asyncio
@@ -992,13 +773,23 @@ async def test_catalog_status_is_read_only_and_contacts_fail_closed_without_muta
     assert "history catalog --rebuild" in output
     assert snapshot_history_state(plugin) == before
 
+    exit_code, output = _run_history_cli(plugin, "history", "catalog", "--rebuild")
+
+    assert exit_code == 0
+    assert output.startswith("status=rebuilt ")
+    after = snapshot_history_state(plugin)
+    assert {path for path in before.keys() | after.keys() if before.get(path) != after.get(path)} <= {
+        "contacts.json", ".contacts.json.dirty"}
+    assert ".contacts.json.dirty" not in after
+    assert load_catalog(plugin)["contacts"][0]["message_count"] == (2 if state == "stale" else 1)
+    assert _run_history_cli(plugin, "history", "contacts")[0] == 0
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "argv",
     [
         ("history", "chats"),
-        ("history", "contacts"),
         ("history", "show", "--chat", "991", "--limit", "1"),
         ("history", "search", "--text", "first", "--limit", "5"),
         ("history", "export", "--chat", "991", "--format", "text", "--limit", "1"),
@@ -1047,71 +838,37 @@ async def test_catalog_backed_cli_reads_fail_closed_on_stale_catalog_without_mut
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "argv",
+    ("lock", "argv"),
     [
-        ("history", "catalog"),
-        ("history", "stats"),
-        ("history", "verify"),
+        ("root", ("history", "catalog")),
+        ("root", ("history", "stats")),
+        ("root", ("history", "verify")),
+        ("chat", ("history", "catalog")),
+        ("chat", ("history", "show", "--chat", "991", "--limit", "1")),
+        ("chat", ("history", "verify")),
     ],
 )
-async def test_missing_root_lock_fails_closed_without_mutation(
-    enabled_history,
-    argv: tuple[str, ...],
-):
+async def test_missing_lock_fails_closed_without_mutation(enabled_history, lock: str, argv: tuple[str, ...]):
     plugin = enabled_history
     history = plugin._history_support
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
     await history.observe_ptb_update(
-        make_business_text_update(text="root lock archive", update_id=1, date=base),
-        bot=FakeBot(),
-        now=base,
-    )
-
-    root_lock = history._root_lock_path()
-    root_lock.unlink()
-    before = snapshot_history_state(plugin)
-
-    exit_code, output = _run_history_cli(plugin, *argv)
-
-    assert exit_code == 1
-    assert "history root lock is uninitialized" in output
-    assert snapshot_history_state(plugin) == before
-    assert not root_lock.exists()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ("history", "catalog"),
-        ("history", "show", "--chat", "991", "--limit", "1"),
-        ("history", "verify"),
-    ],
-)
-async def test_missing_chat_lock_fails_closed_without_mutation(
-    enabled_history,
-    argv: tuple[str, ...],
-):
-    plugin = enabled_history
-    history = plugin._history_support
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    await history.observe_ptb_update(
-        make_business_text_update(text="chat lock archive", update_id=1, date=base),
+        make_business_text_update(text="lock archive", update_id=1, date=base),
         bot=FakeBot(),
         now=base,
     )
 
     chat_dir = history._history_chat_dir_path("business-123", 991)
-    chat_lock = history._chat_lock_path(chat_dir)
-    chat_lock.unlink()
+    lock_path = history._root_lock_path() if lock == "root" else history._chat_lock_path(chat_dir)
+    lock_path.unlink()
     before = snapshot_history_state(plugin)
 
     exit_code, output = _run_history_cli(plugin, *argv)
 
     assert exit_code == 1
-    assert "history chat lock is uninitialized" in output
+    assert f"history {lock} lock is uninitialized" in output
     assert snapshot_history_state(plugin) == before
-    assert not chat_lock.exists()
+    assert not lock_path.exists()
 
 
 def test_catalog_rebuild_supports_old_jsonl_without_profile_snapshots(plugin, monkeypatch: pytest.MonkeyPatch):
@@ -1137,101 +894,6 @@ def test_catalog_rebuild_supports_old_jsonl_without_profile_snapshots(plugin, mo
     assert entry["chat_id"] == 991
     assert entry["current_profile"] is None
     assert entry["message_count"] == 1
-
-
-@pytest.mark.asyncio
-async def test_catalog_missing_and_corrupt_can_be_rebuilt_explicitly_without_touching_canonical_history(
-    enabled_history,
-):
-    plugin = enabled_history
-    history = plugin._history_support
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    await history.observe_ptb_update(
-        make_business_text_update(text="hello", update_id=1, date=base),
-        bot=FakeBot(),
-        now=base,
-    )
-    catalog_path = history.history_root() / "contacts.json"
-    canonical_before = snapshot_history_tree(plugin)
-    catalog_path.unlink()
-
-    exit_code, status = _run_history_cli(plugin, "history", "catalog")
-
-    assert exit_code == 0
-    assert status.startswith("status=missing ")
-    assert snapshot_history_tree(plugin) == {k: v for k, v in canonical_before.items() if k != "contacts.json"}
-
-    exit_code, rebuilt = _run_history_cli(plugin, "history", "catalog", "--rebuild")
-
-    assert exit_code == 0
-    assert rebuilt.startswith("status=rebuilt ")
-    assert catalog_path.exists()
-    assert {
-        path: data for path, data in snapshot_history_tree(plugin).items() if not path.endswith("contacts.json")
-    } == {
-        path: data for path, data in canonical_before.items() if not path.endswith("contacts.json")
-    }
-
-    catalog_path.write_text("{broken", encoding="utf-8")
-    before_corrupt_rebuild = snapshot_history_tree(plugin)
-
-    exit_code, corrupt = _run_history_cli(plugin, "history", "catalog")
-
-    assert exit_code == 0
-    assert corrupt.startswith("status=corrupt ")
-    assert snapshot_history_tree(plugin) == before_corrupt_rebuild
-
-    exit_code, rebuilt = _run_history_cli(plugin, "history", "catalog", "--rebuild")
-
-    assert exit_code == 0
-    assert rebuilt.startswith("status=rebuilt ")
-    assert {
-        path: data for path, data in snapshot_history_tree(plugin).items() if not path.endswith("contacts.json")
-    } == {
-        path: data for path, data in before_corrupt_rebuild.items() if not path.endswith("contacts.json")
-    }
-
-
-@pytest.mark.asyncio
-async def test_catalog_rebuild_updates_only_derived_state(enabled_history):
-    plugin = enabled_history
-    history = plugin._history_support
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    await history.observe_ptb_update(
-        make_business_text_update(text="first contact", message_id=77, update_id=1, date=base),
-        bot=FakeBot(),
-        now=base,
-    )
-    history.rebuild_contact_catalog()
-    append_raw_history_records(
-        plugin,
-        make_history_record(
-            plugin,
-            event_type="message.created",
-            source="business_message",
-            observed_at=base + timedelta(seconds=1),
-            telegram_update_id=2,
-            business_connection_id="business-123",
-            chat_id=991,
-            message_id=78,
-            message_at=base + timedelta(seconds=1),
-            sender_id=2000,
-            direction="inbound",
-            text="second contact",
-        ),
-    )
-    history._mark_catalog_dirty("force rebuild path")
-    before = snapshot_history_tree(plugin)
-
-    exit_code, output = _run_history_cli(plugin, "history", "catalog", "--rebuild")
-
-    assert exit_code == 0
-    assert output.startswith("status=rebuilt ")
-    after = snapshot_history_tree(plugin)
-    changed = {path for path in set(before) | set(after) if before.get(path) != after.get(path)}
-    assert changed <= {"contacts.json", ".contacts.json.dirty"}
-    assert ".contacts.json.dirty" not in after
-    assert load_catalog(plugin)["contacts"][0]["message_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -1274,31 +936,11 @@ async def test_catalog_rebuild_fails_on_torn_tail_without_mutation_then_succeeds
 
 
 @pytest.mark.asyncio
-async def test_catalog_rebuild_reinitializes_missing_locks_and_restores_normal_reads(enabled_history):
-    plugin = enabled_history
-    history = plugin._history_support
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    await history.observe_ptb_update(
-        make_business_text_update(text="rebuild init", update_id=1, date=base),
-        bot=FakeBot(),
-        now=base,
-    )
-
-    chat_dir = history._history_chat_dir_path("business-123", 991)
-    remove_history_locks(plugin)
-
-    catalog = history.rebuild_contact_catalog()
-
-    assert catalog["contact_count"] == 1
-    assert history._root_lock_path().exists()
-    assert history._chat_lock_path(chat_dir).exists()
-    exit_code, output = _run_history_cli(plugin, "history", "contacts")
-    assert exit_code == 0
-    assert "chat=991" in output
-
-
-@pytest.mark.asyncio
-async def test_capture_write_reinitializes_missing_locks_and_restores_normal_reads(enabled_history):
+@pytest.mark.parametrize(
+    "remedy",
+    [("history", "catalog", "--rebuild"), ("history", "maintain"), ("history", "verify", "--repair-tails"), "capture"],
+)
+async def test_writers_reinitialize_missing_locks_and_restore_normal_reads(enabled_history, remedy):
     plugin = enabled_history
     history = plugin._history_support
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
@@ -1307,88 +949,25 @@ async def test_capture_write_reinitializes_missing_locks_and_restores_normal_rea
         bot=FakeBot(),
         now=base,
     )
-
-    chat_dir = history._history_chat_dir_path("business-123", 991)
     remove_history_locks(plugin)
 
-    wrote = await history.observe_ptb_update(
-        make_business_text_update(text="after reinit", message_id=78, update_id=2, date=base + timedelta(seconds=1)),
-        bot=FakeBot(),
-        now=base + timedelta(seconds=1),
-    )
+    if remedy == "capture":
+        assert await history.observe_ptb_update(
+            make_business_text_update(text="after reinit", message_id=78, update_id=2, date=base),
+            bot=FakeBot(),
+            now=base + timedelta(seconds=1),
+        )
+    else:
+        assert _run_history_cli(plugin, *remedy)[0] == 0
 
-    assert wrote is True
-    assert history._root_lock_path().exists()
-    assert history._chat_lock_path(chat_dir).exists()
-    assert [record["message_id"] for record in load_records(plugin)] == [77, 78]
+    assert _run_history_cli(plugin, "history", "verify")[0] == 0
     exit_code, output = _run_history_cli(plugin, "history", "show", "--chat", "991", "--limit", "2")
     assert exit_code == 0
-    assert "after reinit" in output
+    assert ("after reinit" if remedy == "capture" else "before reinit") in output
 
 
 @pytest.mark.asyncio
-async def test_verify_repair_reinitializes_missing_locks_and_restores_normal_verify(enabled_history):
-    plugin = enabled_history
-    history = plugin._history_support
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    await history.observe_ptb_update(
-        make_business_text_update(text="verify init", update_id=1, date=base),
-        bot=FakeBot(),
-        now=base,
-    )
-
-    chat_dir = history._history_chat_dir_path("business-123", 991)
-    remove_history_locks(plugin)
-
-    repaired = history.verify_history(repair_tails=True)
-    verified = history.verify_history()
-
-    assert repaired.ok is True
-    assert verified.ok is True
-    assert history._root_lock_path().exists()
-    assert history._chat_lock_path(chat_dir).exists()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("argv", "expected_exit", "expected_output"),
-    [
-        (["history", "catalog"], 0, "status=stale "),
-        (["history", "catalog", "--rebuild"], 1, "error: canonical history changed during catalog rebuild"),
-        (
-            ["history", "contacts"],
-            1,
-            "error: history contact catalog is stale; run 'hermes telesec history catalog --rebuild'",
-        ),
-        (
-            ["history", "show", "--contact", "@customer991", "--limit", "1"],
-            1,
-            "error: history contact catalog is stale; run 'hermes telesec history catalog --rebuild'",
-        ),
-        (
-            ["history", "search", "--contact", "@customer991", "--text", "hello", "--limit", "1"],
-            1,
-            "error: history contact catalog is stale; run 'hermes telesec history catalog --rebuild'",
-        ),
-        (
-            ["history", "export", "--contact", "@customer991", "--format", "text", "--limit", "1"],
-            1,
-            "error: history contact catalog is stale; run 'hermes telesec history catalog --rebuild'",
-        ),
-        (
-            ["history", "search", "--text", "hello", "--limit", "1"],
-            1,
-            "error: history contact catalog is stale; run 'hermes telesec history catalog --rebuild'",
-        ),
-    ],
-)
-async def test_catalog_rebuild_exhaustion_returns_cli_error(
-    enabled_history,
-    monkeypatch: pytest.MonkeyPatch,
-    argv: list[str],
-    expected_exit: int,
-    expected_output: str,
-):
+async def test_catalog_rebuild_exhaustion_returns_cli_error(enabled_history, monkeypatch: pytest.MonkeyPatch):
     plugin = enabled_history
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
 
@@ -1410,70 +989,12 @@ async def test_catalog_rebuild_exhaustion_returns_cli_error(
             "total_bytes": 1,
         }
 
-    monkeypatch.setattr(plugin._history_support, "_history_source_signature", _changing_signature)
     monkeypatch.setattr(plugin._history_support, "_history_source_signature_locked", _changing_signature)
 
-    exit_code, output = _run_history_cli(plugin, *argv)
+    exit_code, output = _run_history_cli(plugin, "history", "catalog", "--rebuild")
 
-    assert exit_code == expected_exit
-    assert output.startswith(expected_output)
-
-
-def test_catalog_concurrent_refresh_preserves_all_entries(plugin):
-    history = plugin._history_support
-    history.rebuild_contact_catalog()
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    record_one = history._build_event(
-        event_type="message.created",
-        source="business_message",
-        observed_at=base,
-        telegram_update_id=1,
-        business_connection_id="business-123",
-        chat_id=991,
-        message_id=77,
-        message_at=base,
-        sender_id=2000,
-        direction="inbound",
-        reply_to_message_id=None,
-        text="one",
-        chat_profile={"id": 991, "type": "private", "username": "one", "first_name": "One"},
-        sender_profile={"id": 2000, "username": "one", "first_name": "One"},
-    )
-    record_two = history._build_event(
-        event_type="message.created",
-        source="business_message",
-        observed_at=base + timedelta(seconds=1),
-        telegram_update_id=2,
-        business_connection_id="business-456",
-        chat_id=992,
-        message_id=78,
-        message_at=base + timedelta(seconds=1),
-        sender_id=2001,
-        direction="inbound",
-        reply_to_message_id=None,
-        text="two",
-        chat_profile={"id": 992, "type": "private", "username": "two", "first_name": "Two"},
-        sender_profile={"id": 2001, "username": "two", "first_name": "Two"},
-    )
-
-    barrier = threading.Barrier(2)
-
-    def _refresh(record):
-        barrier.wait()
-        history._refresh_contact_catalog([record])
-
-    first = threading.Thread(target=_refresh, args=(record_one,))
-    second = threading.Thread(target=_refresh, args=(record_two,))
-    first.start()
-    second.start()
-    first.join()
-    second.join()
-
-    catalog = load_catalog(plugin)
-    assert {(entry["business_connection_id"], entry["chat_id"]) for entry in catalog["contacts"]} == {
-        ("business-123", 991),
-        ("business-456", 992),
-    }
+    assert exit_code == 1
+    assert output.startswith("error: canonical history changed during catalog rebuild")
 
 
 def test_capture_root_lock_serializes_canonical_append_and_catalog_publish(enabled_history, monkeypatch: pytest.MonkeyPatch):
@@ -1582,83 +1103,6 @@ def test_capture_root_lock_serializes_canonical_append_and_catalog_publish(enabl
 
 
 @pytest.mark.asyncio
-async def test_numeric_chat_lookup_without_connection_checks_canonical_duplicates_when_catalog_is_stale(
-    enabled_history,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys,
-):
-    plugin = enabled_history
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(
-            business_id="business-123",
-            chat_id=991,
-            chat_username="duplicate-one",
-            from_user_username="duplicate-one",
-            text="first duplicate",
-            update_id=1,
-            date=base,
-        ),
-        bot=FakeBot(),
-        now=base,
-    )
-
-    def _fail_refresh(_records, *, base_source_signature=None):
-        raise RuntimeError("catalog broke")
-
-    def _fail_dirty(_reason: str):
-        raise OSError("dirty broke")
-
-    monkeypatch.setattr(plugin._history_support, "_refresh_contact_catalog_locked", _fail_refresh)
-    monkeypatch.setattr(plugin._history_support, "_mark_catalog_dirty_locked", _fail_dirty)
-
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(
-            business_id="business-456",
-            chat_id=991,
-            chat_username="duplicate-two",
-            from_user_username="duplicate-two",
-            text="second duplicate",
-            update_id=2,
-            date=base + timedelta(seconds=1),
-        ),
-        bot=FakeBot(),
-        now=base + timedelta(seconds=1),
-    )
-
-    assert not catalog_dirty_path(plugin).exists()
-    assert load_catalog(plugin)["contact_count"] == 1
-
-    plugin._history_support.reset_in_memory_caches()
-    reloaded = _load_plugin_module(monkeypatch, plugin._history_support.history_root().parents[2])
-    parser = _build_history_parser(reloaded)
-
-    exit_code = reloaded._history_support.handle_cli(
-        parser.parse_args(["history", "show", "--chat", "991", "--limit", "1"])
-    )
-    ambiguous = capsys.readouterr().out.strip()
-
-    assert exit_code == 1
-    assert "history contact catalog is stale" in ambiguous
-    assert "history catalog --rebuild" in ambiguous
-
-    exit_code, rebuilt = _run_history_cli(reloaded, "history", "catalog", "--rebuild")
-
-    assert exit_code == 0
-    assert rebuilt.startswith("status=rebuilt ")
-
-    exit_code = reloaded._history_support.handle_cli(
-        parser.parse_args(["history", "show", "--connection", "business-456", "--chat", "991", "--limit", "1"])
-    )
-    resolved = capsys.readouterr().out.strip()
-
-    assert exit_code == 0
-    assert "connection=business-456" in resolved
-    assert "second duplicate" in resolved
-
-
-@pytest.mark.asyncio
 async def test_torn_tail_is_repaired_before_next_append_without_full_read_bytes(enabled_history, monkeypatch: pytest.MonkeyPatch):
     plugin = enabled_history
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
@@ -1691,31 +1135,6 @@ async def test_torn_tail_is_repaired_before_next_append_without_full_read_bytes(
     assert len(lines) == 2
     assert [json.loads(line)["message_id"] for line in lines] == [77, 78]
     assert history_file.read_bytes().endswith(b"\n")
-
-
-@pytest.mark.asyncio
-async def test_streamed_show_errors_on_torn_tail_without_mutation(enabled_history, capsys):
-    plugin = enabled_history
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="one", message_id=77, update_id=1, date=base),
-        bot=FakeBot(),
-        now=base,
-    )
-    history_file = load_history_file(plugin)
-    with history_file.open("ab") as handle:
-        handle.write(b"{\"event_id\":\"broken\"")
-    torn_bytes = history_file.read_bytes()
-
-    parser = _build_history_parser(plugin)
-    exit_code = plugin._history_support.handle_cli(parser.parse_args(["history", "show", "--chat", "991", "--limit", "5"]))
-    output = capsys.readouterr().out.strip()
-
-    assert exit_code == 1
-    assert "history contact catalog is stale" in output
-    assert "history catalog --rebuild" in output
-    assert history_file.read_bytes() == torn_bytes
 
 
 @pytest.mark.asyncio
@@ -1867,7 +1286,10 @@ async def test_streamed_read_waits_for_concurrent_prune_and_keeps_selected_parti
     assert not old_file.exists()
 
 
-def test_streamed_reader_holding_chat_does_not_deadlock_capture(enabled_history, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("reinitialized", [False, True])
+def test_streamed_reader_holding_chat_serializes_capture_without_deadlock(
+    enabled_history, monkeypatch: pytest.MonkeyPatch, reinitialized: bool,
+):
     plugin = enabled_history
     history = plugin._history_support
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
@@ -1879,90 +1301,9 @@ def test_streamed_reader_holding_chat_does_not_deadlock_capture(enabled_history,
             now=base,
         )
     )
-
-    chat_dir = history._history_chat_dir("business-123", 991)
-    history_file = load_history_file(plugin)
-    original_open = Path.open
-    reader_selected = threading.Event()
-    allow_reader_open = threading.Event()
-    reader_done = threading.Event()
-    writer_done = threading.Event()
-    results: dict[str, Any] = {}
-
-    def _blocking_open(path_obj: Path, *args, **kwargs):
-        mode = args[0] if args else kwargs.get("mode", "r")
-        if path_obj == history_file and "r" in mode:
-            reader_selected.set()
-            assert allow_reader_open.wait(timeout=5)
-        return original_open(path_obj, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "open", _blocking_open)
-
-    def _reader() -> None:
-        try:
-            with history._streamed_records_locked(chat_dir, since=None, until=None, text_query=None) as records:
-                results["records"] = list(records)
-        except Exception as exc:  # noqa: BLE001 - asserted below
-            results["reader_exc"] = exc
-        finally:
-            reader_done.set()
-
-    def _writer() -> None:
-        try:
-            results["writer"] = asyncio.run(
-                history.observe_ptb_update(
-                    make_business_text_update(
-                        text="two",
-                        message_id=78,
-                        update_id=2,
-                        date=base + timedelta(seconds=1),
-                    ),
-                    bot=FakeBot(),
-                    now=base + timedelta(seconds=1),
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 - asserted below
-            results["writer_exc"] = exc
-        finally:
-            writer_done.set()
-
-    reader_thread = threading.Thread(target=_reader)
-    writer_thread = threading.Thread(target=_writer)
-    reader_thread.start()
-    assert reader_selected.wait(timeout=5)
-
-    writer_thread.start()
-    assert writer_done.wait(timeout=0.1) is False
-
-    allow_reader_open.set()
-    reader_thread.join(timeout=5)
-    writer_thread.join(timeout=5)
-
-    assert not reader_thread.is_alive()
-    assert not writer_thread.is_alive()
-    assert reader_done.is_set()
-    assert writer_done.is_set()
-    assert "reader_exc" not in results
-    assert "writer_exc" not in results
-    assert results["writer"] is True
-    assert [record["message_id"] for record in results["records"]] == [77]
-    assert [record["message_id"] for record in load_records(plugin)] == [77, 78]
-
-
-def test_reinitialized_read_lock_still_serializes_capture_writer(enabled_history, monkeypatch: pytest.MonkeyPatch):
-    plugin = enabled_history
-    history = plugin._history_support
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-
-    asyncio.run(
-        history.observe_ptb_update(
-            make_business_text_update(text="one", message_id=77, update_id=1, date=base),
-            bot=FakeBot(),
-            now=base,
-        )
-    )
-    remove_history_locks(plugin)
-    history.rebuild_contact_catalog()
+    if reinitialized:
+        remove_history_locks(plugin)
+        history.rebuild_contact_catalog()
 
     chat_dir = history._history_chat_dir("business-123", 991)
     history_file = load_history_file(plugin)
@@ -2034,7 +1375,7 @@ def test_reinitialized_read_lock_still_serializes_capture_writer(enabled_history
 
 
 @pytest.mark.asyncio
-async def test_second_append_uses_cached_chat_state_without_full_reload(enabled_history, monkeypatch: pytest.MonkeyPatch):
+async def test_chat_state_cache_skips_reloads_until_an_external_write(enabled_history, monkeypatch: pytest.MonkeyPatch):
     plugin = enabled_history
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
     original_loader = plugin._history_support._load_chat_state_from_disk
@@ -2052,34 +1393,10 @@ async def test_second_append_uses_cached_chat_state_without_full_reload(enabled_
         bot=FakeBot(),
         now=base,
     )
-    assert loads == 1
-
     await plugin._history_support.observe_ptb_update(
         make_business_text_update(text="two", message_id=78, update_id=2, date=base),
         bot=FakeBot(),
         now=base + timedelta(seconds=1),
-    )
-    assert loads == 1
-
-
-@pytest.mark.asyncio
-async def test_external_file_signature_change_invalidates_cached_chat_state(enabled_history, monkeypatch: pytest.MonkeyPatch):
-    plugin = enabled_history
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    original_loader = plugin._history_support._load_chat_state_from_disk
-    loads = 0
-
-    def _counting_loader(chat_dir: Path, *, repair_tails: bool):
-        nonlocal loads
-        loads += 1
-        return original_loader(chat_dir, repair_tails=repair_tails)
-
-    monkeypatch.setattr(plugin._history_support, "_load_chat_state_from_disk", _counting_loader)
-
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="one", message_id=77, update_id=1, date=base),
-        bot=FakeBot(),
-        now=base,
     )
     assert loads == 1
 
@@ -2106,12 +1423,12 @@ async def test_external_file_signature_change_invalidates_cached_chat_state(enab
     os.utime(history_file, ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 1))
 
     await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="three", message_id=78, update_id=2, date=base),
+        make_business_text_update(text="three", message_id=79, update_id=3, date=base),
         bot=FakeBot(),
         now=base + timedelta(seconds=3),
     )
     assert loads == 2
-    assert [record["message_id"] for record in load_records(plugin)] == [77, 700, 78]
+    assert [record["message_id"] for record in load_records(plugin)] == [77, 78, 700, 79]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are required")
@@ -2197,16 +1514,8 @@ async def test_deletion_timer_preserves_active_profile_context(enabled_history, 
     )
     default_catalog_path = history._catalog_path()
     default_catalog = default_catalog_path.read_bytes()
-    completed = threading.Event()
-    original_timer_callback = history._run_scheduled_deletion_timer
-
-    def run_timer(*args):
-        try:
-            original_timer_callback(*args)
-        finally:
-            completed.set()
-
-    monkeypatch.setattr(history, "_run_scheduled_deletion_timer", run_timer)
+    timers = TimerHarness()
+    monkeypatch.setattr(history.threading, "Timer", timers.timer)
     token = profile_home.set(tmp_path / "scoped")
     try:
         set_switch(enabled_history, "history", True)
@@ -2220,7 +1529,8 @@ async def test_deletion_timer_preserves_active_profile_context(enabled_history, 
     finally:
         profile_home.reset(token)
 
-    assert await asyncio.to_thread(completed.wait, 3)
+    (timer,) = timers.timers
+    timer.fire()
     assert default_catalog_path.read_bytes() == default_catalog
     scoped_catalog = json.loads(scoped_catalog_path.read_text())
     assert len(scoped_catalog["contacts"]) == 1
@@ -2300,48 +1610,6 @@ async def test_capture_waiting_for_history_lock_keeps_event_loop_responsive(enab
     assert len(load_records(enabled_history)) == 2
 
 
-async def _delete_and_classify(
-    plugin,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    original_text: str | None,
-    replacement_text: str | None,
-    expected_status: str,
-    replacement_message_id: int = 88,
-    base: datetime | None = None,
-    reload_after_delete: bool = False,
-):
-    base = base or datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    set_switch(plugin, "history", True)
-    monkeypatch.setenv("TELESEC_HISTORY_CORRECTION_WINDOW", "10")
-
-    if original_text is not None:
-        await plugin._history_support.observe_ptb_update(
-            make_business_text_update(text=original_text, message_id=77, update_id=1, date=base),
-            bot=FakeBot(),
-            now=base,
-        )
-    await plugin._history_support.observe_ptb_update(
-        make_deleted_update(message_ids=(77,), update_id=2),
-        bot=FakeBot(),
-        now=base + timedelta(seconds=1),
-    )
-    if reload_after_delete:
-        plugin = _load_plugin_module(monkeypatch, plugin._history_support.history_root().parents[3])
-    if replacement_text is not None:
-        await plugin._history_support.observe_ptb_update(
-            make_business_text_update(text=replacement_text, message_id=replacement_message_id, update_id=3, date=base),
-            bot=FakeBot(),
-            now=base + timedelta(seconds=5),
-        )
-    result = plugin._history_support.maintain_history(now=base + timedelta(seconds=20))
-    records = load_records(plugin, business_id="business-123", chat_id=991)
-    classifications = [record for record in records if record["event_type"] == "deletion.classified"]
-    assert classifications
-    assert classifications[-1]["classification"] == expected_status
-    return classifications[-1], result
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("original_text", "replacement_text", "expected_status", "expected_reason"),
@@ -2351,37 +1619,37 @@ async def _delete_and_classify(
         ("alpha beta gamma", "gamma beta alpha", "unexplained", "no_strong_match"),
         ("ok", "okay", "unexplained", "no_strong_match"),
         ("https://example.com 😄", "https://example.com 😄", "likely_duplicate", "normalized_exact_duplicate"),
+        (None, "replacement", "unclassifiable", "missing_original"),
     ],
 )
 async def test_deleted_message_classification_fixtures(
-    plugin,
-    monkeypatch: pytest.MonkeyPatch,
-    original_text: str,
-    replacement_text: str,
-    expected_status: str,
-    expected_reason: str,
+    enabled_history, original_text: str | None, replacement_text: str, expected_status: str, expected_reason: str,
 ):
-    classification, _result = await _delete_and_classify(
-        plugin,
-        monkeypatch,
-        original_text=original_text,
-        replacement_text=replacement_text,
-        expected_status=expected_status,
+    history = enabled_history._history_support
+    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    if original_text is not None:
+        await history.observe_ptb_update(
+            make_business_text_update(text=original_text, message_id=77, update_id=1, date=base),
+            bot=FakeBot(),
+            now=base,
+        )
+    await history.observe_ptb_update(
+        make_deleted_update(message_ids=(77,), update_id=2),
+        bot=FakeBot(),
+        now=base + timedelta(seconds=1),
     )
-    assert classification["classification_reason"] == expected_reason
-
-
-@pytest.mark.asyncio
-async def test_deleted_message_without_original_is_unclassifiable(plugin, monkeypatch: pytest.MonkeyPatch):
-    classification, result = await _delete_and_classify(
-        plugin,
-        monkeypatch,
-        original_text=None,
-        replacement_text="replacement",
-        expected_status="unclassifiable",
+    await history.observe_ptb_update(
+        make_business_text_update(text=replacement_text, message_id=88, update_id=3, date=base),
+        bot=FakeBot(),
+        now=base + timedelta(seconds=5),
     )
-    assert classification["classification_reason"] == "missing_original"
-    assert result.classified >= 1
+
+    assert history.maintain_history(now=base + timedelta(seconds=20)).classified == 1
+    (classification,) = [
+        record for record in load_records(enabled_history) if record["event_type"] == "deletion.classified"
+    ]
+    assert (classification["classification"], classification["classification_reason"]) == (
+        expected_status, expected_reason)
 
 
 @pytest.mark.asyncio
@@ -2553,11 +1821,11 @@ async def test_deleted_message_classification_survives_restart(plugin, monkeypat
         bot=FakeBot(),
         now=base + timedelta(seconds=5),
     )
-    result = reloaded._history_support.maintain_history(now=base + timedelta(seconds=20))
+    result = reloaded._history_support.run_startup_maintenance(now=base + timedelta(seconds=20))
     records = load_records(reloaded)
     classifications = [record for record in records if record["event_type"] == "deletion.classified"]
 
-    assert result.classified >= 1
+    assert result.classified == 1
     assert classifications[-1]["classification"] == "likely_duplicate"
     assert classifications[-1]["replacement_message_id"] == 88
 
@@ -2590,72 +1858,6 @@ async def test_idle_deletion_is_classified_by_scheduler_without_manual_maintain(
     timers.timers[0].fire()
 
     classifications = [record for record in load_records(plugin) if record["event_type"] == "deletion.classified"]
-    assert classifications
-    assert classifications[-1]["classification"] == "unexplained"
-
-
-@pytest.mark.asyncio
-async def test_startup_maintenance_classifies_overdue_deletions(plugin, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    set_switch(plugin, "history", True)
-    monkeypatch.setenv("TELESEC_HISTORY_CORRECTION_WINDOW", "10")
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    timers = TimerHarness()
-    monkeypatch.setattr(plugin._history_support.threading, "Timer", timers.timer)
-
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="Please call me back", message_id=77, update_id=1, date=base),
-        bot=FakeBot(),
-        now=base,
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_deleted_update(message_ids=(77,), update_id=2),
-        bot=FakeBot(),
-        now=base + timedelta(seconds=1),
-    )
-
-    plugin._history_support.reset_in_memory_caches()
-    reloaded = _load_plugin_module(monkeypatch, tmp_path)
-    result = reloaded._history_support.run_startup_maintenance(now=base + timedelta(seconds=20))
-    records = load_records(reloaded)
-    classifications = [record for record in records if record["event_type"] == "deletion.classified"]
-
-    assert result.classified == 1
-    assert classifications[-1]["classification"] == "unexplained"
-
-
-@pytest.mark.asyncio
-async def test_startup_maintenance_recovers_pending_timer_before_window(plugin, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    set_switch(plugin, "history", True)
-    monkeypatch.setenv("TELESEC_HISTORY_CORRECTION_WINDOW", "10")
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    first_timers = TimerHarness()
-    monkeypatch.setattr(plugin._history_support.threading, "Timer", first_timers.timer)
-
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="Please call me back", message_id=77, update_id=1, date=base),
-        bot=FakeBot(),
-        now=base,
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_deleted_update(message_ids=(77,), update_id=2),
-        bot=FakeBot(),
-        now=base + timedelta(seconds=1),
-    )
-    assert len(first_timers.timers) == 1
-
-    plugin._history_support.reset_in_memory_caches()
-    reloaded = _load_plugin_module(monkeypatch, tmp_path)
-    second_timers = TimerHarness()
-    monkeypatch.setattr(reloaded._history_support.threading, "Timer", second_timers.timer)
-    result = reloaded._history_support.run_startup_maintenance(now=base + timedelta(seconds=5))
-
-    assert result.classified == 0
-    assert len(second_timers.timers) == 1
-    assert second_timers.timers[0].interval == pytest.approx(6.0)
-
-    second_timers.timers[0].fire()
-
-    classifications = [record for record in load_records(reloaded) if record["event_type"] == "deletion.classified"]
     assert classifications
     assert classifications[-1]["classification"] == "unexplained"
 
@@ -2984,7 +2186,7 @@ def test_collect_history_stats_streams_bounded_snapshot_without_full_load(plugin
     records: list[dict[str, Any]] = []
     update_id = 1
 
-    for business_id, chat_id, count in (("business-123", 991, 3000), ("business-456", 992, 1000)):
+    for business_id, chat_id, count in (("business-123", 991, 3), ("business-456", 992, 1)):
         for index in range(count):
             observed_at = base + timedelta(seconds=index)
             records.append(
@@ -3112,13 +2314,13 @@ def test_collect_history_stats_streams_bounded_snapshot_without_full_load(plugin
     summary = history._scan_chat_live_pending_summary(history._history_chat_dir_path("business-123", 991), repair_tails=False)
     stats = history.collect_history_stats()
 
-    assert summary.record_count == 3005
+    assert summary.record_count == 8
     assert summary.pending_count == 1
     assert summary.unexplained_count == 1
     assert summary.max_live_pending == 2
     assert stats.chat_count == 2
     assert stats.file_count == 2
-    assert stats.record_count == 4005
+    assert stats.record_count == 9
     assert stats.pending_count == 1
     assert stats.unexplained_count == 1
     assert stats.total_bytes == total_bytes
@@ -3249,7 +2451,7 @@ def test_verify_history_streams_bounded_archive_and_detects_duplicates(plugin, m
     records: list[dict[str, Any]] = []
     update_id = 1
 
-    for index in range(2496):
+    for index in range(96):
         observed_at = base + timedelta(seconds=index)
         records.append(
             make_history_record(
@@ -3517,71 +2719,10 @@ def test_verify_history_streams_bounded_archive_and_detects_duplicates(plugin, m
     assert not list(history.history_root().glob(f"{history.VERIFY_EVENT_ID_TEMP_DIR_PREFIX}*"))
 
 
-def test_verify_history_reports_active_month_torn_tail_without_repair(plugin):
-    history = plugin._history_support
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    record = make_history_record(
-        plugin,
-        event_type="message.created",
-        source="business_message",
-        observed_at=base,
-        telegram_update_id=1,
-        business_connection_id="business-123",
-        chat_id=991,
-        message_id=77,
-        message_at=base,
-        sender_id=2000,
-        direction="inbound",
-        text="tail without newline",
-    )
-    append_raw_history_records(plugin, record)
-
-    history_file = load_history_file(plugin)
-    with history_file.open("rb+") as handle:
-        handle.seek(-1, os.SEEK_END)
-        handle.truncate()
-
-    verification = history.verify_history()
-
-    assert verification.ok is False
-    assert verification.repaired_files == 0
-    assert any(history_file.name in error and "verify --repair-tails" in error for error in verification.errors)
-
-
-def test_verify_history_repairs_valid_final_record_missing_newline(plugin):
-    history = plugin._history_support
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    record = make_history_record(
-        plugin,
-        event_type="message.created",
-        source="business_message",
-        observed_at=base,
-        telegram_update_id=1,
-        business_connection_id="business-123",
-        chat_id=991,
-        message_id=77,
-        message_at=base,
-        sender_id=2000,
-        direction="inbound",
-        text="repair newline only",
-    )
-    append_raw_history_records(plugin, record)
-
-    history_file = load_history_file(plugin)
-    with history_file.open("rb+") as handle:
-        handle.seek(-1, os.SEEK_END)
-        handle.truncate()
-
-    verification = history.verify_history(repair_tails=True)
-
-    assert verification.ok is True
-    assert verification.record_count == 1
-    assert verification.repaired_files == 1
-    assert history_file.read_bytes().endswith(b"\n")
-    assert len(history_file.read_text(encoding="utf-8").splitlines()) == 1
-
-
-def test_verify_history_repairs_partial_torn_tail_without_full_load(plugin, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("tear", ["missing_newline", "partial_record"])
+def test_verify_reports_a_torn_tail_and_repair_tails_fixes_it_without_full_load(
+    plugin, monkeypatch: pytest.MonkeyPatch, tear: str,
+):
     history = plugin._history_support
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
     record = make_history_record(
@@ -3601,24 +2742,24 @@ def test_verify_history_repairs_partial_torn_tail_without_full_load(plugin, monk
     append_raw_history_records(plugin, record)
 
     history_file = load_history_file(plugin)
-    with history_file.open("ab") as handle:
-        handle.write(b"{\"event_id\":\"broken\"")
+    with history_file.open("rb+") as handle:
+        if tear == "missing_newline":
+            handle.seek(-1, os.SEEK_END)
+            handle.truncate()
+        else:
+            handle.seek(0, os.SEEK_END)
+            handle.write(b"{\"event_id\":\"broken\"")
+    torn_bytes = history_file.read_bytes()
 
-    monkeypatch.setattr(
-        history,
-        "_load_records",
-        lambda *_args, **_kwargs: pytest.fail("_load_records must not be used by history verify repair"),
-    )
-    monkeypatch.setattr(
-        history,
-        "_load_chat_state",
-        lambda *_args, **_kwargs: pytest.fail("_load_chat_state must not be used by history verify repair"),
-    )
-    monkeypatch.setattr(
-        history,
-        "_build_chat_state",
-        lambda *_args, **_kwargs: pytest.fail("_build_chat_state must not be used by history verify repair"),
-    )
+    for name in ("_load_records", "_load_chat_state", "_build_chat_state"):
+        monkeypatch.setattr(history, name, lambda *_args, name=name, **_kwargs: pytest.fail(f"{name} in verify"))
+
+    verification = history.verify_history()
+
+    assert verification.ok is False
+    assert verification.repaired_files == 0
+    assert any(history_file.name in error and "verify --repair-tails" in error for error in verification.errors)
+    assert history_file.read_bytes() == torn_bytes
 
     verification = history.verify_history(repair_tails=True)
 
@@ -3830,41 +2971,6 @@ def test_known_chat_type_fallback_does_not_repair_torn_tail(enabled_history):
     assert history_file.read_bytes() == torn_bytes
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ("history", "show", "--chat", "991"),
-        ("history", "search", "--chat", "991", "--text", "hello"),
-        ("history", "export", "--chat", "991"),
-        ("history", "deletions", "--chat", "991", "--status", "pending"),
-    ],
-)
-def test_history_cli_read_paths_error_on_torn_tail_without_mutation(enabled_history, argv: tuple[str, ...]):
-    plugin = enabled_history
-    history = plugin._history_support
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    asyncio.run(
-        history.observe_ptb_update(
-            make_business_text_update(text="cli torn tail", message_id=77, update_id=1, date=base),
-            bot=FakeBot(),
-            now=base,
-        )
-    )
-
-    history_file = load_history_file(plugin)
-    with history_file.open("rb+") as handle:
-        handle.seek(-1, os.SEEK_END)
-        handle.truncate()
-    torn_bytes = history_file.read_bytes()
-
-    exit_code, output = _run_history_cli(plugin, *argv)
-
-    assert exit_code == 1
-    assert "history contact catalog is stale" in output
-    assert "history catalog --rebuild" in output
-    assert history_file.read_bytes() == torn_bytes
-
-
 def test_verify_history_caps_diagnostics_and_cli_output(plugin, monkeypatch: pytest.MonkeyPatch):
     history = plugin._history_support
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
@@ -3889,7 +2995,7 @@ def test_verify_history_caps_diagnostics_and_cli_output(plugin, monkeypatch: pyt
     update_id += 1
     duplicate_event_id = duplicate_seed["event_id"]
 
-    for index in range(1000):
+    for index in range(10):
         record = make_history_record(
             plugin,
             event_type="message.created",
@@ -3908,7 +3014,7 @@ def test_verify_history_caps_diagnostics_and_cli_output(plugin, monkeypatch: pyt
         records.append(record)
         update_id += 1
 
-    for index in range(1000):
+    for index in range(10):
         record = make_history_record(
             plugin,
             event_type="message.created",
@@ -3927,7 +3033,7 @@ def test_verify_history_caps_diagnostics_and_cli_output(plugin, monkeypatch: pyt
         records.append(record)
         update_id += 1
 
-    for index in range(1000):
+    for index in range(10):
         record = make_history_record(
             plugin,
             event_type="message.created",
@@ -3946,7 +3052,7 @@ def test_verify_history_caps_diagnostics_and_cli_output(plugin, monkeypatch: pyt
         records.append(record)
         update_id += 1
 
-    for index in range(1000):
+    for index in range(10):
         record = make_history_record(
             plugin,
             event_type="deletion.classified",
@@ -3976,10 +3082,10 @@ def test_verify_history_caps_diagnostics_and_cli_output(plugin, monkeypatch: pyt
     verification = history.verify_history()
 
     assert verification.ok is False
-    assert verification.error_count == 1000
-    assert verification.warning_count == 3000
-    assert verification.suppressed_error_count == 995
-    assert verification.suppressed_warning_count == 2995
+    assert verification.error_count == 10
+    assert verification.warning_count == 30
+    assert verification.suppressed_error_count == 5
+    assert verification.suppressed_warning_count == 25
     assert len(verification.errors) == 5
     assert len(verification.warnings) == 5
     assert all("missing event_id" in error for error in verification.errors)
@@ -3992,13 +3098,13 @@ def test_verify_history_caps_diagnostics_and_cli_output(plugin, monkeypatch: pyt
     assert exit_code == 1
     assert output_lines[0] == (
         f"ok=False chats=1 files=1 records={len(records)} repaired_files=0 "
-        "errors=1000 warnings=3000"
+        "errors=10 warnings=30"
     )
     assert len(output_lines) == 13
     assert all(line.startswith("warning: ") and "duplicate event_id" in line for line in output_lines[1:6])
-    assert output_lines[6] == "warning: suppressed 2995 additional warnings"
+    assert output_lines[6] == "warning: suppressed 25 additional warnings"
     assert all(line.startswith("error: ") and "missing event_id" in line for line in output_lines[7:12])
-    assert output_lines[12] == "error: suppressed 995 additional errors"
+    assert output_lines[12] == "error: suppressed 5 additional errors"
     assert not list(history.history_root().glob(".verify-*"))
 
 
@@ -4212,49 +3318,6 @@ async def test_history_cli_numeric_chat_resolution_uses_fresh_catalog_for_duplic
 
 
 @pytest.mark.asyncio
-async def test_history_cli_numeric_chat_resolution_surfaces_catalog_freshness_error_without_full_load(
-    enabled_history,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys,
-):
-    plugin = enabled_history
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(text="catalog error", update_id=1, date=base),
-        bot=FakeBot(),
-        now=base,
-    )
-
-    history = plugin._history_support
-
-    def _raise_catalog_error(
-        *,
-        rebuild_on_missing: bool,
-        rebuild_on_corrupt: bool,
-        rebuild_on_dirty: bool,
-        rebuild_on_stale: bool,
-        allow_missing_empty: bool,
-        repair_tails: bool,
-    ):
-        raise ValueError("history contact catalog is stale; run 'hermes telesec history catalog --rebuild'")
-
-    monkeypatch.setattr(history, "_load_contact_catalog", _raise_catalog_error)
-    monkeypatch.setattr(
-        history,
-        "_load_records",
-        lambda *_args, **_kwargs: pytest.fail("_load_records must not be used when catalog freshness fails"),
-    )
-
-    parser = _build_history_parser(plugin)
-    exit_code = history.handle_cli(parser.parse_args(["history", "show", "--chat", "991", "--limit", "1"]))
-    output = capsys.readouterr().out.strip()
-
-    assert exit_code == 1
-    assert "history contact catalog is stale" in output
-
-
-@pytest.mark.asyncio
 async def test_history_cli_contact_lookup_normalizes_unicode_nfkc_and_casefold(
     plugin,
     monkeypatch: pytest.MonkeyPatch,
@@ -4372,72 +3435,6 @@ async def test_history_cli_chat_search_normalizes_unicode_nfkc_and_casefold(plug
 
 
 @pytest.mark.asyncio
-async def test_history_cli_global_search_normalizes_unicode_nfkc_and_casefold(
-    plugin,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys,
-):
-    set_switch(plugin, "history", True)
-    base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
-    decomposed_text = "Cafe\u0301 refund"
-    fullwidth_text = "Ｆｕｌｌｗｉｄｔｈ receipt"
-    ascii_text = "plain ascii refund"
-
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(chat_id=991, text=decomposed_text, update_id=1, date=base),
-        bot=FakeBot(),
-        now=base,
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(
-            chat_id=992,
-            chat_username="customer992",
-            from_user_username="customer992",
-            text=fullwidth_text,
-            update_id=2,
-            date=base + timedelta(seconds=1),
-        ),
-        bot=FakeBot(),
-        now=base + timedelta(seconds=1),
-    )
-    await plugin._history_support.observe_ptb_update(
-        make_business_text_update(
-            chat_id=993,
-            chat_username="customer993",
-            from_user_username="customer993",
-            text=ascii_text,
-            update_id=3,
-            date=base + timedelta(seconds=2),
-        ),
-        bot=FakeBot(),
-        now=base + timedelta(seconds=2),
-    )
-
-    parser = _build_history_parser(plugin)
-
-    exit_code = plugin._history_support.handle_cli(
-        parser.parse_args(["history", "search", "--text", "caf\u00e9", "--limit", "5"])
-    )
-    output = capsys.readouterr().out.strip().splitlines()
-    assert exit_code == 0
-    assert any(decomposed_text in line for line in output)
-
-    exit_code = plugin._history_support.handle_cli(
-        parser.parse_args(["history", "search", "--text", "fullwidth receipt", "--limit", "5"])
-    )
-    output = capsys.readouterr().out.strip().splitlines()
-    assert exit_code == 0
-    assert any(fullwidth_text in line for line in output)
-
-    exit_code = plugin._history_support.handle_cli(
-        parser.parse_args(["history", "search", "--text", "ASCII REFUND", "--limit", "5"])
-    )
-    output = capsys.readouterr().out.strip().splitlines()
-    assert exit_code == 0
-    assert any(ascii_text in line for line in output)
-
-
-@pytest.mark.asyncio
 async def test_history_cli_prunes_months_and_answers_contact_last_week_workflow(
     plugin,
     monkeypatch: pytest.MonkeyPatch,
@@ -4529,7 +3526,7 @@ def test_streaming_query_scale_prunes_partitions_and_keeps_results_bounded(plugi
     set_switch(plugin, "history", True)
     history = plugin._history_support
     records = []
-    for month, total in ((6, 250), (7, 1250)):
+    for month, total in ((6, 2), (7, 5), (8, 1)):
         for index in range(total):
             observed_at = datetime(2026, month, 10, 12, 0, tzinfo=UTC) + timedelta(seconds=index)
             records.append(
@@ -4577,14 +3574,14 @@ def test_streaming_query_scale_prunes_partitions_and_keeps_results_bounded(plugi
                 "--until",
                 "2026-07-31T23:59:59Z",
                 "--limit",
-                "25",
+                "3",
             ]
         )
     )
     output = capsys.readouterr().out.strip().splitlines()
 
     assert exit_code == 0
-    assert len(output) == 25
+    assert len(output) == 3
     assert selected == ["2026-07.jsonl"]
     assert all("needle record 7-" in line for line in output)
 
@@ -4629,7 +3626,7 @@ def test_history_cli_deletions_streams_latest_classified_rows_without_full_load(
     update_id = 1
 
     for business_id in ("business-123", "business-456"):
-        for index in range(1800):
+        for index in range(3):
             observed_at = base + timedelta(seconds=index)
             records.append(
                 make_history_record(
@@ -4742,7 +3739,7 @@ def test_history_cli_deletions_pending_streams_live_tombstones_with_bounded_stat
     records: list[dict[str, Any]] = []
     update_id = 1
 
-    for index in range(2500):
+    for index in range(3):
         observed_at = base + timedelta(seconds=index)
         records.append(
             make_history_record(

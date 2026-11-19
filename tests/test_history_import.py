@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import importlib
 import json
 from datetime import UTC, datetime
@@ -86,6 +85,14 @@ async def test_import_fills_history_before_capture_in_order_and_is_idempotent(en
     plugin = enabled_history
     await capture_live(plugin)
     path = write_export(tmp_path, sample_messages())
+    before = snapshot_history_state(plugin)
+
+    code, output = _run_history_cli(plugin, "history", "import", str(path), "--chat", str(CHAT), "--dry-run")
+
+    assert code == 0, output
+    assert output.splitlines()[0].startswith("Would import 5 messages (6 records) into chat 991")
+    assert output.splitlines()[-1] == "Dry run: nothing was written."
+    assert snapshot_history_state(plugin) == before
 
     code, output = _run_history_cli(plugin, "history", "import", str(path), "--chat", str(CHAT))
 
@@ -119,8 +126,10 @@ async def test_import_fills_history_before_capture_in_order_and_is_idempotent(en
     assert by_id[(12, "message.edited")]["observed_at"] == "2026-06-03T08:02:00Z"
     assert all("chat_profile" not in r for r in records if r["source"] == "import")
     history = plugin._history_support
-    chat_dir = history._history_chat_dir_path("business-123", CHAT)
-    assert [p.name for p in history._iter_history_files(chat_dir)] == ["2026-06.jsonl", "2026-07.jsonl"]
+    root = history.history_root()
+    chat_dir = history._history_chat_dir_path("business-123", CHAT).relative_to(root).as_posix()
+    assert {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()} == {
+        ".lock", "contacts.json", f"{chat_dir}/.lock", f"{chat_dir}/2026-06.jsonl", f"{chat_dir}/2026-07.jsonl"}
 
     entry = load_catalog(plugin)["contacts"][0]
     assert entry["message_count"] == 6
@@ -130,62 +139,19 @@ async def test_import_fills_history_before_capture_in_order_and_is_idempotent(en
     assert history.verify_history().ok
     assert history._contact_catalog_status().state == "ok"
 
+    code, output = _run_history_cli(plugin, "stats", "--chat", str(CHAT), "--format", "json", "--tz", "UTC")
+    assert code == 0, output
+    report = json.loads(output)
+    contact = report["contacts"][0] if "contacts" in report else report
+    assert (contact["messages"]["received"], contact["messages"]["sent"], contact["edited"]["total"]) == (4, 2, 1)
+    assert contact["missing_history"]["retained_from"].startswith("2026-06-02")
+
     before = snapshot_history_state(plugin)
     code, output = _run_history_cli(plugin, "history", "import", str(path), "--chat", str(CHAT))
     assert code == 0, output
     assert output.splitlines()[0] == "Nothing to import into chat 991 (connection business-123)."
     assert output.splitlines()[1].startswith("Skipped: 6 already saved, 1 newer than saved history, ")
     assert snapshot_history_state(plugin) == before
-
-
-@pytest.mark.asyncio
-async def test_imported_messages_count_in_stats(enabled_history, tmp_path):
-    plugin = enabled_history
-    await capture_live(plugin)
-    path = write_export(tmp_path, sample_messages())
-    assert _run_history_cli(plugin, "history", "import", str(path), "--chat", str(CHAT))[0] == 0
-
-    code, output = _run_history_cli(plugin, "stats", "--chat", str(CHAT), "--format", "json", "--tz", "UTC")
-
-    assert code == 0, output
-    report = json.loads(output)
-    contact = report["contacts"][0] if "contacts" in report else report
-    assert contact["messages"]["received"] == 4
-    assert contact["messages"]["sent"] == 2
-    assert contact["edited"]["total"] == 1
-    assert contact["missing_history"]["retained_from"].startswith("2026-06-02")
-
-
-@pytest.mark.asyncio
-async def test_dry_run_writes_nothing(enabled_history, tmp_path):
-    plugin = enabled_history
-    await capture_live(plugin)
-    path = write_export(tmp_path, sample_messages())
-    before = snapshot_history_state(plugin)
-
-    code, output = _run_history_cli(plugin, "history", "import", str(path), "--chat", str(CHAT), "--dry-run")
-
-    assert code == 0, output
-    lines = output.splitlines()
-    assert lines[0].startswith("Would import 5 messages (6 records) into chat 991")
-    assert lines[-1] == "Dry run: nothing was written."
-    assert snapshot_history_state(plugin) == before
-
-
-@pytest.mark.asyncio
-async def test_import_writes_only_the_chat_history_files(enabled_history, tmp_path):
-    plugin = enabled_history
-    await capture_live(plugin)
-    path = write_export(tmp_path, sample_messages())
-
-    assert _run_history_cli(plugin, "history", "import", str(path), "--chat", str(CHAT))[0] == 0
-
-    history = plugin._history_support
-    root = history.history_root()
-    chat_dir = history._history_chat_dir_path("business-123", CHAT).relative_to(root).as_posix()
-    files = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
-    assert files == {".lock", "contacts.json", f"{chat_dir}/.lock", f"{chat_dir}/2026-06.jsonl",
-                     f"{chat_dir}/2026-07.jsonl"}
 
 
 def test_import_without_saved_history_needs_a_known_connection(enabled_history, tmp_path):
@@ -255,12 +221,10 @@ async def test_import_finds_the_owner_like_chat_set_and_names_the_old_scope_rule
 
 
 @pytest.mark.asyncio
-async def test_import_skips_messages_older_than_retention(enabled_history, tmp_path, monkeypatch):
+async def test_import_skips_messages_older_than_retention(enabled_history, tmp_path):
     plugin = enabled_history
     await capture_live(plugin)
-    history = plugin._history_support
-    config = history.history_config_from_env()
-    monkeypatch.setattr(history, "history_config_from_env", lambda: dataclasses.replace(config, retention_days=30))
+    th.set_retention(plugin, 30)
     path = write_export(tmp_path, sample_messages())
 
     history_import = importlib.import_module(f"{plugin.__name__}.history_import")
