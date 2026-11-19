@@ -740,13 +740,23 @@ def test_failed_replace_keeps_old_file_and_removes_temp(plugin, modes, monkeypat
     assert list(path.parent.glob(".transcription-modes.*.tmp")) == []
 
 
-def test_writer_waits_for_cross_process_file_lock(plugin, modes):
+def test_writer_waits_for_cross_process_file_lock(plugin, modes, monkeypatch):
     fcntl = pytest.importorskip("fcntl")
     path = modes_file(plugin)
     lock_path = path.with_name(path.name + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.touch()
     errors = []
+    blocked = threading.Event()
+
+    def flock(fd, operation):
+        try:
+            fcntl.flock(fd, operation | fcntl.LOCK_NB)
+        except BlockingIOError:
+            blocked.set()
+            fcntl.flock(fd, operation)
+
+    monkeypatch.setattr(modes._history, "fcntl", SimpleNamespace(**{**vars(fcntl), "flock": flock}))
 
     def write():
         try:
@@ -760,7 +770,7 @@ def test_writer_waits_for_cross_process_file_lock(plugin, modes):
         fcntl.flock(other_process.fileno(), fcntl.LOCK_EX)
         thread = threading.Thread(target=write)
         thread.start()
-        thread.join(timeout=0.3)
+        assert blocked.wait(5)
         assert thread.is_alive()
         assert not path.exists()
         fcntl.flock(other_process.fileno(), fcntl.LOCK_UN)

@@ -336,7 +336,7 @@ async def test_history_turned_off_while_the_save_waits_for_the_lock_saves_nothin
 
     monkeypatch.setattr(history, "_mutate_chat_history_transactionally", wait_for_lock)
     holder = asyncio.create_task(asyncio.to_thread(hold_root_lock))
-    await asyncio.to_thread(locked.wait, 3)
+    assert await asyncio.to_thread(locked.wait, 3)
     publish = asyncio.create_task(_publish(module, message, bot, adapter))
     try:
         assert await asyncio.to_thread(waiting.wait, 3)
