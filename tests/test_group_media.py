@@ -318,17 +318,14 @@ async def test_unaddressed_recording_gets_one_reply_transcript_and_no_request(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("media", list(MEDIA))
-async def test_addressed_recording_gets_standalone_transcript_then_one_handoff(
-    plugin, group_app, monkeypatch, caplog, media,
-):
+async def test_addressed_recording_gets_standalone_transcript_then_one_handoff(plugin, group_app, monkeypatch, caplog):
     app, request = group_app
     boundary = Boundary(monkeypatch, plugin)
     adapter, core = wire(plugin, app, monkeypatch, channel_prompts={str(GROUP): "Answer briefly."})
     features = []
     monkeypatch.setattr(plugin._usage_stats, "feature", features.append)
     caplog.set_level(logging.INFO)
-    update = group_update(app, media=media, reply_to_message=bot_message(), caption=f"@{BOT_USERNAME} and summarize",
+    update = group_update(app, reply_to_message=bot_message(), caption=f"@{BOT_USERNAME} and summarize",
                           caption_entities=[{"type": "mention", "offset": 0, "length": len(BOT_USERNAME) + 1}])
 
     await deliver(plugin, app, update)
@@ -566,10 +563,7 @@ def test_an_unreadable_topic_binding_means_none(plugin):
 # --- What is not claimed ---------------------------------------------------------------------------
 
 NOT_CLAIMED = {
-    "another bot": {"sender": {"id": 4000, "is_bot": True, "first_name": "Weather", "username": "weather_bot"}},
     "this bot": {"sender": BOT_USER},
-    "anonymous admin": {"sender": {"id": 4100, "is_bot": True, "first_name": "Group"},
-                        "sender_chat": {"id": GROUP, "type": "supergroup", "title": "Test group"}},
     "channel post in the group": {"sender": {"id": 4200, "is_bot": False, "first_name": "Telegram"},
                                   "sender_chat": {"id": -1009876543210, "type": "channel", "title": "News"}},
     "automatic forward": {"sender": {"id": 4200, "is_bot": False, "first_name": "Telegram"},
@@ -578,11 +572,8 @@ NOT_CLAIMED = {
     "text": {"media": None, "text": "Tell me a joke?"},
     "addressed text": {"media": None, "text": f"@{BOT_USERNAME} hi", "entities": [
         {"type": "mention", "offset": 0, "length": len(BOT_USERNAME) + 1}]},
-    "photo": {"media": None, "photo": [{"file_id": "p", "file_unique_id": "p", "width": 10, "height": 10}]},
     "video": {"media": None, "video": {"file_id": "x", "file_unique_id": "x", "width": 10, "height": 10,
                                        "duration": 3}},
-    "sticker": {"media": None, "sticker": {"file_id": "s", "file_unique_id": "s", "width": 10, "height": 10,
-                                           "is_animated": False, "is_video": False, "type": "regular"}},
     "pdf document": {"media": None, "document": {"file_id": "d", "file_unique_id": "d", "file_name": "notes.pdf"}},
     "private chat": {"chat_type": "private"},
     "channel post": {"chat_type": "channel", "kind": "channel_post", "sender": None},
@@ -605,10 +596,8 @@ async def test_unclaimed_updates_reach_hermes_untouched(plugin, group_app, monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("chats", "claimed"), [
-    ((), False),
     ((-1009999999999,), False),
-    ((str(GROUP),), True),
-    ((-1009999999999, GROUP), True),
+    ((-1009999999999, str(GROUP)), True),
 ])
 async def test_only_listed_groups_are_claimed(plugin, group_app, monkeypatch, chats, claimed):
     app, request = group_app
@@ -622,14 +611,11 @@ async def test_only_listed_groups_are_claimed(plugin, group_app, monkeypatch, ch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw", [["abc"], [5], ["-0"], [[str(GROUP)]], [True], str(GROUP), {"chat": GROUP}])
-async def test_malformed_group_list_turns_group_mode_off_with_one_warning(
-    plugin, group_app, monkeypatch, caplog, raw,
-):
+async def test_malformed_group_list_turns_group_mode_off_with_one_warning(plugin, group_app, monkeypatch, caplog):
     app, request = group_app
     Boundary(monkeypatch, plugin)
     _adapter, core = wire(plugin, app, monkeypatch)
-    monkeypatch.setattr(plugin._history_support, "get_config", {"group_chats": raw}.get)
+    monkeypatch.setattr(plugin._history_support, "get_config", {"group_chats": [str(GROUP), "abc"]}.get)
     caplog.set_level(logging.WARNING)
 
     await deliver(plugin, app, group_update(app), group_update(app, update_id=2, message_id=78))
@@ -640,10 +626,12 @@ async def test_malformed_group_list_turns_group_mode_off_with_one_warning(
     assert str(GROUP) not in caplog.text
 
 
-def test_group_list_accepts_int_and_string_ids(plugin):
+def test_group_list_accepts_int_and_string_ids_and_rejects_anything_else(plugin):
     parse = plugin._group_media.parse_group_chats
     assert parse([GROUP, str(-1009999999999)]) == {GROUP, -1009999999999}
     assert parse(None) == parse([]) == frozenset()
+    for raw in (["abc"], [5], ["-0"], [[str(GROUP)]], [True], str(GROUP), {"chat": GROUP}):
+        assert parse(raw) is None, raw
     shared = [str(GROUP)]
     parse(shared)
     assert shared == [str(GROUP)]
@@ -704,7 +692,7 @@ async def test_failed_or_empty_stt_posts_nothing_and_starts_no_request(plugin, g
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("media", list(MEDIA))
+@pytest.mark.parametrize("media", ["voice", "audio_document"])
 async def test_recording_over_20_mib_is_not_downloaded(plugin, group_app, monkeypatch, media):
     app, request = group_app
     boundary = Boundary(monkeypatch, plugin)

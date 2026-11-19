@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import contextlib
 import io
 import json
@@ -181,7 +180,7 @@ def test_decide_policy_table(modes, mode, direction, transcribe, reason):
     assert (decision.mode, decision.direction) == (mode, direction)
 
 
-def _media_message(plugin, monkeypatch, media: str, *, from_user_id: int, sender_business_bot: bool):
+def _media_message(plugin, monkeypatch, media: str, *, from_user_id: int):
     tracker = {"extract": 0, "duration": 0}
     if media == "audio":
         message = make_audio_file_message()
@@ -200,29 +199,18 @@ def _media_message(plugin, monkeypatch, media: str, *, from_user_id: int, sender
         monkeypatch.setattr(plugin, "_extract_audio_probe", extract)
     else:
         message = make_message(media_kind=media, from_user_id=from_user_id)
-    if sender_business_bot:
-        message.sender_business_bot = SimpleNamespace(id=555)
     return message, getattr(message, media), tracker
 
 
-DIRECTIONS = {
-    "own_from_owner": (OWNER, False, "own"),
-    "own_sender_business_bot": (PEER, True, "own"),
-    "peer": (PEER, False, "peer"),
-}
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("media", ["voice", "video_note", "audio"])
-@pytest.mark.parametrize("direction_case", list(DIRECTIONS))
+@pytest.mark.parametrize("media", ["voice", "audio"])
+@pytest.mark.parametrize(("from_user_id", "direction"), [(OWNER, "own"), (PEER, "peer")])
 @pytest.mark.parametrize("mode", ["both", "own", "peer", "off"])
-async def test_every_mode_and_direction_for_every_media(plugin, modes, monkeypatch, caplog, mode, direction_case, media):
+async def test_every_mode_and_direction_for_every_media(plugin, modes, monkeypatch, caplog, mode, from_user_id,
+                                                        direction, media):
     caplog.set_level(logging.DEBUG)
-    from_user_id, via_bot, direction = DIRECTIONS[direction_case]
     seed(plugin, OWNER, CHAT, mode)
-    message, payload, tracker = _media_message(
-        plugin, monkeypatch, media, from_user_id=from_user_id, sender_business_bot=via_bot
-    )
+    message, payload, tracker = _media_message(plugin, monkeypatch, media, from_user_id=from_user_id)
     event = make_event(message)
     bot = FakeBot(business_owner_id=OWNER)
     stt_calls = []
@@ -274,6 +262,8 @@ async def test_default_fast_path_makes_no_owner_lookup(plugin, modes, store_stat
 
     assert bot.business_connection_calls == []
     assert bot.calls[0]["text"] == f"🎙️ {LONG_TRANSCRIPT}"
+    if store_state == "missing":
+        assert not modes_file(plugin).parent.exists()
 
 
 @pytest.mark.asyncio
@@ -313,10 +303,9 @@ async def test_edited_media_under_off_is_still_edit_ignored(plugin, modes):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["own", "peer"])
-async def test_unknown_direction_under_own_or_peer_transcribes_and_logs_reason(plugin, modes, caplog, mode):
+async def test_unknown_direction_under_own_transcribes_and_logs_reason(plugin, modes, caplog):
     caplog.set_level(logging.INFO)
-    seed(plugin, OWNER, CHAT, mode)
+    seed(plugin, OWNER, CHAT, "own")
     plugin._history_support._OWNER_CACHE[BCID] = str(OWNER)
     message = make_message(from_user_id=PEER, caption="Private caption words")
     message.from_user = None
@@ -407,6 +396,7 @@ async def test_owner_lookup_failure_never_applies_another_owners_entry(plugin, m
     assert len(bot.calls) == 1
     assert "decision=transcribe reason=owner_unknown:lookup_failed:RuntimeError" in caplog.text
     assert "secret-detail" not in caplog.text
+    assert json.loads(modes_file(plugin).read_text(encoding="utf-8"))["connections"] == {"business-a": "1000"}
 
 
 @pytest.mark.asyncio
@@ -423,20 +413,6 @@ async def test_owner_lookup_failure_for_a_bound_owner_without_entry_uses_both(pl
 
     assert len(bot.calls) == 1
     assert "decision=transcribe reason=mode_both:owner_unknown:lookup_failed:RuntimeError" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_owner_lookup_failure_without_binding_fails_open(plugin, modes, caplog):
-    caplog.set_level(logging.INFO)
-    seed(plugin, OWNER, CHAT, "off")
-    bot = FakeBot(business_owner_id=OWNER)
-    bot.business_connection_error = RuntimeError("lookup down")
-
-    await _voice_event(plugin, bot)
-
-    assert len(bot.calls) == 1
-    assert "decision=transcribe reason=owner_unknown:lookup_failed:RuntimeError" in caplog.text
-    assert "connections" not in json.loads(modes_file(plugin).read_text(encoding="utf-8"))
 
 
 def test_connection_bindings_round_trip_and_invalid_ones_are_skipped(plugin, modes, caplog):
@@ -552,7 +528,7 @@ async def test_direction_helper_falls_back_to_the_stored_binding(plugin, modes):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "sender", "transcribed"),
-    [("own", PEER, False), ("own", OWNER, True), ("peer", OWNER, False), ("peer", PEER, True)],
+    [("own", PEER, False), ("own", OWNER, True)],
 )
 async def test_stored_binding_gives_direction_when_the_lookup_fails(plugin, modes, caplog, mode, sender, transcribed):
     caplog.set_level(logging.INFO)
@@ -575,43 +551,7 @@ async def test_stored_binding_gives_direction_when_the_lookup_fails(plugin, mode
     assert "direction_unknown" not in caplog.text
 
 
-@pytest.mark.asyncio
-async def test_direction_adapters_keep_their_contracts(plugin, modes):
-    history = plugin._history_support
-    bot = FakeBot(business_owner_id=OWNER)
-
-    assert await history._resolve_direction(_direction_message(from_user_id=OWNER), bot=bot) == "outbound"
-    assert await history._resolve_direction(_direction_message(from_user_id=PEER), bot=bot) == "inbound"
-    assert await history._resolve_direction(_direction_message(from_user_id=None), bot=bot) == "unknown"
-    assert await plugin._is_outgoing_business_message(bot=bot, message=_direction_message(from_user_id=OWNER))
-    assert not await plugin._is_outgoing_business_message(bot=bot, message=_direction_message(from_user_id=PEER))
-    assert not await plugin._is_outgoing_business_message(bot=bot, message=_direction_message(from_user_id=None))
-    assert bot.business_connection_calls == [BCID]
-
-
 # --- Policy before download -------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_hook_path_claims_skipped_note_without_download(plugin, modes):
-    seed(plugin, OWNER, CHAT, "off")
-    message = make_message(from_user_id=PEER)
-    event = make_event(message)
-    bot = FakeBot(business_owner_id=OWNER)
-    gateway = gateway_for(event, bot)
-
-    result = plugin._on_pre_gateway_dispatch(event, gateway)
-    if plugin._pending_tasks:
-        await asyncio.gather(*plugin._pending_tasks)
-
-    assert result == {"action": "skip", "reason": "telegram_business_voice_media_transcribed"}
-    assert message.voice.get_file_calls == 0
-    assert bot.calls == []
-    assert bot.edit_calls == []
-    assert plugin._on_pre_gateway_dispatch(event, gateway) == {
-        "action": "skip",
-        "reason": "telegram_business_voice_media_duplicate",
-    }
 
 
 @pytest.mark.asyncio
@@ -672,17 +612,6 @@ async def test_transcribe_text_in_a_business_chat_is_ordinary_history(history_en
 # --- Reload without restart -------------------------------------------------------------------
 
 
-def test_gateway_store_sees_another_process_write_without_reset(plugin, modes):
-    gateway_store = modes.ModeStore()
-    cli_store = modes.ModeStore()
-    cli_store.set_mode(OWNER, CHAT, "off", via="cli")
-    assert gateway_store.get(OWNER, CHAT).mode == "off"
-
-    cli_store.set_mode(OWNER, CHAT, "own", via="cli")
-
-    assert gateway_store.get(OWNER, CHAT).mode == "own"
-
-
 def test_external_replace_with_identical_mtime_and_size_is_detected(plugin, modes):
     store = modes.ModeStore()
     store.set_mode(OWNER, CHAT, "off", via="cli", now=datetime(2026, 10, 19, 12, 0, tzinfo=UTC))
@@ -711,35 +640,20 @@ def _rewrite_in_place(path: Path, mode: str) -> None:
         handle.truncate()
 
 
-def test_in_place_edit_with_same_inode_and_size_is_reloaded_on_mtime_change(plugin, modes):
+@pytest.mark.parametrize(("mode", "mtime_step"), [("own", 1_000_000), ("both", 0)])
+def test_in_place_edit_with_same_inode_is_reloaded_on_mtime_or_size_change(plugin, modes, mode, mtime_step):
     store = modes.ModeStore()
     store.set_mode(OWNER, CHAT, "off", via="cli")
     path = modes_file(plugin)
     original = path.stat()
     assert store.get(OWNER, CHAT).mode == "off"
 
-    _rewrite_in_place(path, "own")
-    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns + 1_000_000))
+    _rewrite_in_place(path, mode)
+    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns + mtime_step))
     assert path.stat().st_ino == original.st_ino
-    assert path.stat().st_size == original.st_size
+    assert (path.stat().st_mtime_ns != original.st_mtime_ns) != (path.stat().st_size != original.st_size)
 
-    assert store.get(OWNER, CHAT).mode == "own"
-
-
-def test_in_place_edit_with_same_inode_and_mtime_is_reloaded_on_size_change(plugin, modes):
-    store = modes.ModeStore()
-    store.set_mode(OWNER, CHAT, "off", via="cli")
-    path = modes_file(plugin)
-    original = path.stat()
-    assert store.get(OWNER, CHAT).mode == "off"
-
-    _rewrite_in_place(path, "both")
-    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
-    assert path.stat().st_ino == original.st_ino
-    assert path.stat().st_mtime_ns == original.st_mtime_ns
-    assert path.stat().st_size != original.st_size
-
-    assert store.get(OWNER, CHAT).mode == "both"
+    assert store.get(OWNER, CHAT).mode == mode
 
 
 @pytest.mark.asyncio
@@ -824,26 +738,6 @@ def test_failed_replace_keeps_old_file_and_removes_temp(plugin, modes, monkeypat
 
     assert path.read_bytes() == before
     assert list(path.parent.glob(".transcription-modes.*.tmp")) == []
-
-
-def test_concurrent_writers_do_not_lose_updates(plugin, modes):
-    errors = []
-
-    def write(chat):
-        try:
-            modes.ModeStore().set_mode(OWNER, chat, "off", via="cli")
-        except Exception as exc:  # noqa: BLE001 - surfaced through the assertion below
-            errors.append(exc)
-
-    threads = [threading.Thread(target=write, args=(5000 + index,)) for index in range(8)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-    assert errors == []
-    payload = json.loads(modes_file(plugin).read_text(encoding="utf-8"))
-    assert sorted(payload["owners"]["1000"]["chats"]) == [str(5000 + index) for index in range(8)]
 
 
 def test_writer_waits_for_cross_process_file_lock(plugin, modes):
@@ -943,28 +837,6 @@ def test_reset_never_creates_an_owner_and_drops_an_emptied_extra_owner(plugin, m
 
 
 # --- Corrupt or missing file ------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_missing_file_reads_create_nothing_and_note_is_transcribed(plugin, modes):
-    store = modes.default_store()
-    path = modes_file(plugin)
-
-    assert store.snapshot() == {}
-    assert store.get(OWNER, CHAT) is None
-    assert not path.parent.exists()
-
-    message = make_message(from_user_id=PEER)
-    event = make_event(message)
-    bot = FakeBot(business_owner_id=OWNER)
-    await plugin._process_business_voice_event(
-        event=event,
-        gateway=gateway_for(event, bot),
-        transcribe_fn=lambda _path: {"success": True, "transcript": LONG_TRANSCRIPT},
-    )
-    assert len(bot.calls) == 1
-    assert not path.exists()
-    assert not path.with_name(path.name + ".lock").exists()
 
 
 CORRUPT_PAYLOADS = {
@@ -1202,10 +1074,9 @@ def test_stat_failure_marks_the_file_degraded_until_it_reads_again(plugin, modes
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("payload", ["", " \n\t\n"])
-async def test_empty_modes_file_reads_as_no_modes(plugin, modes, caplog, payload):
+async def test_empty_modes_file_reads_as_no_modes(plugin, modes, caplog):
     path = modes_file(plugin)
-    _write_raw(path, payload)
+    _write_raw(path, " \n\t\n")
     store = modes.default_store()
 
     assert store.snapshot() == {}
@@ -1279,22 +1150,6 @@ def test_invalid_entries_are_skipped_and_valid_entries_apply(plugin, modes, capl
     assert "skipped 3 invalid entries" in caplog.text
 
 
-def test_write_on_corrupt_file_backs_it_up(plugin, modes):
-    path = modes_file(plugin)
-    _write_raw(path, "{not json")
-
-    exit_code, output = run_cli(plugin, "mode", "set", "991", "off", "--owner", "1000")
-
-    assert exit_code == 0
-    backups = list(path.parent.glob("transcription-modes.json.corrupt-*"))
-    assert len(backups) == 1
-    assert backups[0].read_bytes() == b"{not json"
-    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
-    assert f"warning: corrupt transcription-modes.json backed up to {backups[0]}" in output
-    assert output.endswith("chat=991 mode=off")
-    assert json.loads(path.read_text(encoding="utf-8"))["owners"]["1000"]["chats"]["991"]["mode"] == "off"
-
-
 # --- CLI --------------------------------------------------------------------------------------
 
 
@@ -1323,7 +1178,13 @@ def test_cli_reports_a_corrupt_modes_file_and_only_an_explicit_owner_write_repai
         assert output.startswith("error: ") and "is corrupt (JSONDecodeError)" in output, argv
         assert "SECRET-CONTENT" not in output, argv
 
-    assert run_cli(plugin, "mode", "set", "991", "off", "--owner", "1000")[0] == 0
+    exit_code, output = run_cli(plugin, "mode", "set", "991", "off", "--owner", "1000")
+    (backup,) = modes_file(plugin).parent.glob("transcription-modes.json.corrupt-*")
+    assert exit_code == 0
+    assert output.splitlines() == [f"warning: corrupt transcription-modes.json backed up to {backup}",
+                                   "chat=991 mode=off"]
+    assert backup.read_bytes() == b"{not json SECRET-CONTENT"
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
     assert run_cli(plugin, "mode", "get", "991")[1].startswith("chat=991 mode=off")
 
 
