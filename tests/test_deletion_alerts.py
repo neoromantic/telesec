@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import test_history
-from test_history import FakeBot, make_business_text_update, make_deleted_update, set_switch
+from test_history import FakeBot, make_business_text_update, make_deleted_update, set_switch, watch_lock_waits
 
 plugin = test_history.plugin  # fixtures
 enabled_history = test_history.enabled_history
@@ -248,10 +248,11 @@ async def test_listener_replay_and_erase_cannot_recreate_a_chat(enabled_history,
     with ThreadPoolExecutor(max_workers=2) as pool:
         replay = pool.submit(history.set_deletion_listener, lambda record, original: None)
         assert listed.wait(2)
+        root_waiters = watch_lock_waits(monkeypatch, history._root_lock_path())
         erase = pool.submit(history.erase_chat_history, "business-123", 991)
         try:
-            with pytest.raises(TimeoutError):
-                erase.result(timeout=0.05)
+            assert root_waiters.wait(2)
+            assert not erase.done()
         finally:
             proceed.set()
         replay.result(timeout=2)

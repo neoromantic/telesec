@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import contextlib
 import errno
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -273,6 +274,28 @@ def remove_history_locks(plugin) -> None:
         chat_lock = history._chat_lock_path(chat_dir)
         if chat_lock.exists():
             chat_lock.unlink()
+
+
+def watch_lock_waits(monkeypatch: pytest.MonkeyPatch, lock_path: Path, count: int = 1) -> threading.Event:
+    """Set once ``count`` flock calls on ``lock_path`` found it held and started to wait for it."""
+    real_flock = fcntl.flock
+    lock_stat = lock_path.stat()
+    waits: list[int] = []
+    reached = threading.Event()
+
+    def _flock(fd: int, operation: int) -> None:
+        if operation != fcntl.LOCK_UN and os.path.samestat(os.fstat(fd), lock_stat):
+            try:
+                real_flock(fd, operation | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                waits.append(operation)
+                if len(waits) >= count:
+                    reached.set()
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", _flock)
+    return reached
 
 
 def make_history_record(
@@ -1064,12 +1087,14 @@ def test_capture_root_lock_serializes_canonical_append_and_catalog_publish(enabl
     cli_thread = threading.Thread(target=_contacts_cli)
     first_thread.start()
     assert first_refresh_waiting.wait(timeout=5)
+    root_waiters = watch_lock_waits(monkeypatch, history._root_lock_path(), 2)
 
     second_thread.start()
     cli_thread.start()
 
-    assert second_append_started.wait(timeout=0.1) is False
-    assert cli_done.wait(timeout=0.1) is False
+    assert root_waiters.wait(timeout=5)
+    assert not second_append_started.is_set()
+    assert not cli_done.is_set()
 
     second_chat_dir = history._history_chat_dir_path("business-456", 992)
     assert not second_chat_dir.exists() or not list(second_chat_dir.glob("*.jsonl"))
@@ -1138,7 +1163,10 @@ async def test_torn_tail_is_repaired_before_next_append_without_full_read_bytes(
 
 
 @pytest.mark.asyncio
-async def test_streamed_read_waits_for_concurrent_append_and_never_exposes_partial_json(enabled_history):
+async def test_streamed_read_waits_for_concurrent_append_and_never_exposes_partial_json(
+    enabled_history,
+    monkeypatch: pytest.MonkeyPatch,
+):
     plugin = enabled_history
     history = plugin._history_support
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
@@ -1196,9 +1224,11 @@ async def test_streamed_read_waits_for_concurrent_append_and_never_exposes_parti
     reader_thread = threading.Thread(target=_reader)
     writer_thread.start()
     assert writer_started.wait(timeout=5)
+    chat_waiters = watch_lock_waits(monkeypatch, history._chat_lock_path(chat_dir))
 
     reader_thread.start()
-    assert reader_done.wait(timeout=0.1) is False
+    assert chat_waiters.wait(timeout=5)
+    assert not reader_done.is_set()
 
     release_writer.set()
     writer_thread.join(timeout=5)
@@ -1267,9 +1297,11 @@ async def test_streamed_read_waits_for_concurrent_prune_and_keeps_selected_parti
     prune_thread = threading.Thread(target=_prune)
     reader_thread.start()
     assert reader_selected.wait(timeout=5)
+    chat_waiters = watch_lock_waits(monkeypatch, history._chat_lock_path(chat_dir))
 
     prune_thread.start()
-    assert prune_done.wait(timeout=0.1) is False
+    assert chat_waiters.wait(timeout=5)
+    assert not prune_done.is_set()
 
     allow_reader_open.set()
     reader_thread.join(timeout=5)
@@ -1355,9 +1387,11 @@ def test_streamed_reader_holding_chat_serializes_capture_without_deadlock(
     writer_thread = threading.Thread(target=_writer)
     reader_thread.start()
     assert reader_selected.wait(timeout=5)
+    chat_waiters = watch_lock_waits(monkeypatch, history._chat_lock_path(chat_dir))
 
     writer_thread.start()
-    assert writer_done.wait(timeout=0.1) is False
+    assert chat_waiters.wait(timeout=5)
+    assert not writer_done.is_set()
 
     allow_reader_open.set()
     reader_thread.join(timeout=5)
@@ -1583,30 +1617,36 @@ async def test_deletion_retry_after_original_partition_is_pruned_keeps_one_tombs
 
 
 @pytest.mark.asyncio
-async def test_capture_waiting_for_history_lock_keeps_event_loop_responsive(enabled_history):
+async def test_capture_waiting_for_history_lock_keeps_event_loop_responsive(
+    enabled_history,
+    monkeypatch: pytest.MonkeyPatch,
+):
     history = enabled_history._history_support
     assert await history.observe_ptb_update(make_business_text_update(), bot=FakeBot())
     lock_held = threading.Event()
     release_lock = threading.Event()
+    released_by_loop: list[bool] = []
 
     def hold_lock():
         with history._root_writer_lock():
             lock_held.set()
-            release_lock.wait(timeout=2)
+            released_by_loop.append(release_lock.wait(timeout=5))
 
     worker = threading.Thread(target=hold_lock)
     worker.start()
     assert await asyncio.to_thread(lock_held.wait, 1)
+    root_waiters = watch_lock_waits(monkeypatch, history._root_lock_path())
     capture = asyncio.create_task(
         history.observe_ptb_update(make_business_text_update(message_id=78, update_id=124), bot=FakeBot())
     )
     try:
-        await asyncio.sleep(0.02)
+        assert await asyncio.to_thread(root_waiters.wait, 5)
         assert not capture.done()
     finally:
         release_lock.set()
         await asyncio.to_thread(worker.join)
         await capture
+    assert released_by_loop == [True]
     assert len(load_records(enabled_history)) == 2
 
 
@@ -2413,11 +2453,13 @@ async def test_collect_history_stats_holds_root_snapshot_against_concurrent_capt
     prune_thread = threading.Thread(target=_prune)
     stats_thread.start()
     assert stats_selected.wait(timeout=5)
+    root_waiters = watch_lock_waits(monkeypatch, history._root_lock_path(), 2)
 
     capture_thread.start()
     prune_thread.start()
-    assert capture_done.wait(timeout=0.1) is False
-    assert prune_done.wait(timeout=0.1) is False
+    assert root_waiters.wait(timeout=5)
+    assert not capture_done.is_set()
+    assert not prune_done.is_set()
 
     allow_stats_open.set()
     stats_thread.join(timeout=5)
