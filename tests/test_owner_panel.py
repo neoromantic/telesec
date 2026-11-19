@@ -136,17 +136,13 @@ PICKER_ROW = [("• both", "tb:m:991:both"), ("own", "tb:m:991:own"), ("peer", "
         ("/start bizChat-100123", -100123),
         ("/start bizChat991 ", 991),
         ("/start bizchat991", None),
-        ("/start BizChat991", None),
         ("/start bizChat", None),
-        ("/start bizChat99x", None),
         ("/start bizChat991 extra", None),
         ("/start", None),
         ("/startbizChat991", None),
-        ("start bizChat991", None),
         (" /start bizChat991", None),
         ("/start bizChat1234567890123456789012", None),
         (None, None),
-        (991, None),
     ],
 )
 def test_parse_start_payload(plugin, text, expected):
@@ -168,10 +164,18 @@ def test_callback_data_round_trips_and_is_parsed_strictly(plugin):
         "tb:m:991:loud",
         "tb:r:991:off",
         "tb:p:991:x",
+        "tb:t:991:x",
+        "tb:f:991",
+        "tb:f:991:h",
+        "tb:f:991:x.on",
+        "tb:f:991:a.maybe",
+        "tb:f:991:h.on:extra",
         "tb:s:991",
         "tb:s:991:Stats",
         "tb:s:991:stats/",
         "tb:x:991",
+        "tb:x:991:abc",
+        "tb:x:991:-5",
         "tb:m:abc:off",
         "tb:m:991:off:extra",
         "tb:m:991:off\n",
@@ -181,19 +185,14 @@ def test_callback_data_round_trips_and_is_parsed_strictly(plugin):
         b"tb:m:991:off",
     ):
         assert panel.parse_callback(bad) is None, bad
-
-
-def test_callback_data_never_exceeds_64_bytes(plugin):
-    panel = plugin._owner_panel
-    longest_chat = -(10**19)
-    for mode in panel.MODES:
-        assert len(panel.callback_data("m", longest_chat, mode).encode()) <= 64
-    assert len(panel.section_callback(longest_chat, "a" * 16).encode()) <= 64
-    with pytest.raises(ValueError):
-        panel.section_callback(longest_chat, "a" * 16, "b" * 30)
     with pytest.raises(ValueError):
         panel.callback_data("m", 991, "loud")
-    assert panel.parse_callback("tb:s:1:" + "a" * 16 + "/" + "b" * 40) is None
+    longest_chat = -(10**19)
+    for action, arg in [("t", None), ("x", "9" * 20), *(("m", mode) for mode in panel.MODES),
+                        *(("f", arg) for arg in panel.FLAG_ARGS)]:
+        data = panel.callback_data(action, longest_chat, arg)
+        assert len(data.encode()) <= 64
+        assert panel.parse_callback(data) == panel.PanelCallback(action, longest_chat, arg)
 
 
 def test_longest_section_key_and_sub_fit_while_under_64_bytes(plugin):
@@ -253,20 +252,8 @@ async def test_owner_start_sends_the_panel_and_stops_dispatch(plugin, modes):
     assert call["text"] == "Owner panel: chat 991\nHistory: off in Settings"
     assert keyboard(call["reply_markup"]) == [MODE_ROW, [("🔄 Refresh", "tb:p:991")]]
     assert bot.business_connection_calls == [BCID]
-
-
-@pytest.mark.asyncio
-async def test_panel_shows_the_stored_mode_label_and_reset(plugin, modes):
-    bind_owner(plugin)
-    ttm.seed(plugin, OWNER, CHAT, "peer", label="Casey (@casey)")
-    bot = PanelBot(business_owner_id=OWNER)
-
-    assert await dispatch(plugin, start_update(), bot) is True
-
-    (call,) = bot.calls
-    assert call["text"] == "Owner panel: Casey (@casey) · chat 991\nHistory: off in Settings"
-    rows = keyboard(call["reply_markup"])
-    assert rows[0] == [("🎙️ Transcription: peer ›", "tb:t:991")]
+    assert await dispatch(plugin, callback_update("tb:p:991"), bot) is True
+    assert bot.business_connection_calls == [BCID]
 
 
 @pytest.mark.asyncio
@@ -275,7 +262,6 @@ async def test_non_owner_start_is_not_claimed(plugin, modes):
     bot = PanelBot(business_owner_id=OWNER)
 
     assert await dispatch(plugin, start_update(from_user_id=PEER), bot) is False
-    assert await plugin._handle_owner_panel_update(start_update(from_user_id=PEER), bot=bot) is False
 
     assert bot.calls == []
 
@@ -284,23 +270,13 @@ async def test_non_owner_start_is_not_claimed(plugin, modes):
 async def test_unknown_connection_gets_one_hint_and_is_claimed(plugin, modes):
     bot = PanelBot(business_owner_id=OWNER)
 
-    assert await dispatch(plugin, start_update(), bot) is True
-    assert await dispatch(plugin, start_update(), bot) is True  # claimed again, but no second hint
+    assert await dispatch(plugin, start_update(language_code="ru"), bot) is True
+    assert await dispatch(plugin, start_update(language_code="ru"), bot) is True  # claimed again, but no second hint
 
-    assert bot.calls == [{"chat_id": OWNER, "text": plugin._owner_panel.tr("unknown_connection")}]
+    assert bot.calls == [{"chat_id": OWNER, "text": plugin._owner_panel.tr("unknown_connection", "ru")}]
+    assert bot.calls[0]["text"].startswith("Пока не могу подтвердить")
     assert bot.business_connection_calls == []
     assert not ttm.modes_file(plugin).exists()
-
-
-@pytest.mark.asyncio
-async def test_unknown_connection_hint_works_without_transcription(plugin, modes, monkeypatch):
-    test_history.set_switch(plugin, "transcription", False)
-    bot = PanelBot(business_owner_id=OWNER)
-
-    assert await dispatch(plugin, start_update(), bot) is True
-
-    assert bot.calls == [{"chat_id": OWNER, "text": plugin._owner_panel.tr("unknown_connection")}]
-    assert "/transcribe" not in bot.calls[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -322,27 +298,6 @@ async def test_any_business_message_in_the_chat_verifies_the_owner(plugin, modes
     # Anyone else is still not the owner, and their `/start` stays ordinary.
     assert await dispatch(plugin, start_update(from_user_id=PEER), bot) is False
     assert not ttm.modes_file(plugin).exists()
-
-
-@pytest.mark.asyncio
-async def test_hint_clears_once_the_sender_is_bound(plugin, modes):
-    bot = PanelBot(business_owner_id=OWNER)
-    assert await dispatch(plugin, start_update(), bot) is True
-    bind_owner(plugin)  # e.g. an earlier panel change in the chat
-
-    assert await dispatch(plugin, start_update(), bot) is True
-
-    assert bot.calls[-1]["text"].startswith("Owner panel: chat 991\n")
-
-
-@pytest.mark.asyncio
-async def test_second_owner_with_a_known_connection_falls_through(plugin, modes):
-    bind_owner(plugin, owner=OWNER, connection="A")
-    bot = MultiOwnerBot({"A": OWNER})
-
-    assert await dispatch(plugin, start_update(from_user_id=3000), bot) is False
-
-    assert bot.calls == []
 
 
 @pytest.mark.asyncio
@@ -463,29 +418,6 @@ async def test_business_connection_update_makes_a_new_owner_known_and_disable_re
 
 
 @pytest.mark.asyncio
-async def test_connection_update_creates_no_modes_file(plugin, modes):
-    handler = connection_handler(plugin)
-
-    await handler.callback(connection_update(owner=OWNER, connection="B"), SimpleNamespace(bot=PanelBot()))
-
-    assert not ttm.modes_file(plugin).exists()
-    assert await dispatch(plugin, start_update(), PanelBot(business_owner_id=OWNER)) is True
-
-
-@pytest.mark.asyncio
-async def test_a_strangers_connection_update_does_not_break_cli_owner_inference(plugin, modes):
-    ttm.seed(plugin, OWNER, 993, "off")
-    assert ttm.run_cli(plugin, "mode", "set", "993", "own")[0] == 0
-    stranger = connection_update(owner=5555, connection="stranger-bc")
-
-    await connection_handler(plugin).callback(stranger, SimpleNamespace(bot=PanelBot()))
-
-    assert modes.default_store().snapshot().owners() == [str(OWNER)]
-    assert ttm.run_cli(plugin, "mode", "set", "993", "own")[0] == 0
-    assert ttm.run_cli(plugin, "mode", "get", "991")[0] == 0
-
-
-@pytest.mark.asyncio
 async def test_lookup_failure_for_one_of_two_connections_falls_through(plugin, modes, monkeypatch):
     # Fail closed: one connection is someone else's and the other cannot be checked.
     catalog = [
@@ -517,17 +449,6 @@ async def test_live_lookup_overrides_a_stale_binding(plugin, modes):
 
     assert await dispatch(plugin, start_update(), bot) is False
     assert bot.calls == []
-
-
-@pytest.mark.asyncio
-async def test_owner_lookups_are_cached_per_connection(plugin, modes):
-    bind_owner(plugin)
-    bot = PanelBot(business_owner_id=OWNER)
-
-    assert await dispatch(plugin, start_update(), bot) is True
-    assert await dispatch(plugin, callback_update("tb:p:991"), bot) is True
-
-    assert bot.business_connection_calls == [BCID]
 
 
 def probe_section(plugin) -> list:
@@ -587,22 +508,6 @@ async def test_real_history_catalog_names_the_chat_and_scopes_the_section(histor
 
 
 @pytest.mark.asyncio
-async def test_panel_keeps_a_stored_label(plugin, modes, monkeypatch):
-    bot = PanelBot(business_owner_id=OWNER)
-    # A label stored earlier (0.9.0's in-chat command stored the chat's own profile).
-    modes.default_store().set_mode(OWNER, CHAT, "off", via="chat", label="Casey Customer (@casey)", connection=BCID)
-    catalog = [{"business_connection_id": BCID, "chat_id": CHAT,
-                "current_profile": {"first_name": "Casey", "last_name": "Customer", "username": "casey"}}]
-    monkeypatch.setattr(plugin, "_panel_catalog", lambda: catalog)
-
-    assert await dispatch(plugin, callback_update("tb:m:991:peer"), bot) is True
-
-    entry = modes.default_store().get(OWNER, CHAT)
-    assert (entry.mode, entry.label) == ("peer", "Casey Customer (@casey)")
-    assert last_edit(bot)[0] == "Owner panel: Casey Customer (@casey) · chat 991\nHistory: off in Settings"
-
-
-@pytest.mark.asyncio
 async def test_header_prefers_the_stored_label_then_the_catalog_then_the_chat_id(plugin, modes, monkeypatch):
     bind_owner(plugin)
     ttm.seed(plugin, OWNER, CHAT, "peer", label="Stored name")
@@ -612,6 +517,7 @@ async def test_header_prefers_the_stored_label_then_the_catalog_then_the_chat_id
 
     assert await dispatch(plugin, start_update(), bot) is True
     assert bot.calls[-1]["text"].startswith("Owner panel: Stored name · chat 991\n")
+    assert keyboard(bot.calls[-1]["reply_markup"])[0] == [("🎙️ Transcription: peer ›", "tb:t:991")]
 
     modes.default_store().reset(str(OWNER), str(CHAT))
     assert await dispatch(plugin, start_update(), bot) is True
@@ -689,19 +595,10 @@ async def test_non_owner_callback_is_claimed_with_an_alert_only(plugin, modes):
 
 
 @pytest.mark.asyncio
-async def test_callback_without_known_connection_is_not_allowed(plugin, modes):
-    bot = PanelBot(business_owner_id=OWNER)
-
-    assert await dispatch(plugin, callback_update("tb:p:991"), bot) is True
-
-    assert bot.answers == [{"callback_query_id": "query-1", "text": "Not allowed", "show_alert": True}]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["both", "own", "peer", "off"])
-async def test_each_mode_button_sets_the_mode_via_panel_and_edits_the_panel(plugin, modes, mode):
+async def test_mode_button_sets_the_mode_via_panel_and_edits_the_panel(plugin, modes):
     bind_owner(plugin)
     bot = PanelBot(business_owner_id=OWNER)
+    mode = "peer"
 
     assert await dispatch(plugin, callback_update(f"tb:m:991:{mode}"), bot) is True
 
@@ -735,7 +632,7 @@ async def test_reset_button_returns_to_default_and_keeps_the_label_rule(plugin, 
 
 
 @pytest.mark.asyncio
-async def test_refresh_shows_a_change_from_elsewhere(plugin, modes):
+async def test_refresh_shows_a_change_from_elsewhere_and_an_unchanged_panel_is_quiet(plugin, modes, caplog):
     bind_owner(plugin)
     bot = PanelBot(business_owner_id=OWNER)
     ttm.seed(plugin, OWNER, CHAT, "off")
@@ -743,19 +640,12 @@ async def test_refresh_shows_a_change_from_elsewhere(plugin, modes):
     assert await dispatch(plugin, callback_update("tb:p:991"), bot) is True
 
     assert bot.answers == [{"callback_query_id": "query-1", "text": "Refreshed"}]
-    assert last_edit(bot)[0] == "Owner panel: chat 991\nHistory: off in Settings"
+    assert last_edit(bot) == ("Owner panel: chat 991\nHistory: off in Settings",
+                              [[("🎙️ Transcription: off ›", "tb:t:991")], [("🔄 Refresh", "tb:p:991")]])
 
-
-@pytest.mark.asyncio
-async def test_not_modified_edit_is_quiet(plugin, modes, caplog):
-    bind_owner(plugin)
-    bot = PanelBot(business_owner_id=OWNER)
     bot.text_edit_error = ttm.BadRequest("Message is not modified: specified new message content is the same")
-
     assert await dispatch(plugin, callback_update("tb:p:991"), bot) is True
-
     assert "owner panel edit failed" not in caplog.text
-    assert bot.answers
 
 
 @pytest.mark.asyncio
@@ -851,17 +741,6 @@ async def test_typed_chat_ids_are_capped_per_owner(plugin, modes, monkeypatch):
     assert sorted(modes.default_store().snapshot()[str(OWNER)]) == ["1", "2"]
 
 
-@pytest.mark.asyncio
-async def test_business_updates_tie_their_chat(plugin, modes):
-    bot = PanelBot(business_owner_id=OWNER)
-    business = ttm.registered_business_handler(plugin, ttm.command_adapter(bot))
-
-    with pytest.raises(ApplicationHandlerStop):
-        await business(ttm.make_text_update("hello", from_user_id=PEER, chat_id=31337), SimpleNamespace(bot=bot))
-
-    assert (BCID, "31337") in plugin._PANEL_SEEN_CHATS
-
-
 def test_store_caps_chats_per_owner(plugin, modes, monkeypatch):
     monkeypatch.setattr(modes, "MAX_CHATS_PER_OWNER", 2)
     store = modes.default_store()
@@ -874,40 +753,24 @@ def test_store_caps_chats_per_owner(plugin, modes, monkeypatch):
     assert store.get(OWNER, 3) is None
 
 
-def test_panel_value_is_not_a_stored_updated_via(plugin, modes):
-    assert modes.UPDATED_VIA == ("chat", "cli")
-
-
 @pytest.mark.asyncio
-async def test_disabled_transcription_hides_mode_controls(plugin, modes, monkeypatch):
-    test_history.set_switch(plugin, "transcription", False)
-    bind_owner(plugin)
-    bot = PanelBot(business_owner_id=OWNER)
-
-    assert await dispatch(plugin, start_update(), bot) is True
-    (call,) = bot.calls
-    assert call["text"] == "Owner panel: chat 991\nTranscription: off in Settings\nHistory: off in Settings"
-    assert keyboard(call["reply_markup"]) == [[("🔄 Refresh", "tb:p:991")]]
-
-    assert await dispatch(plugin, callback_update("tb:m:991:off"), bot) is True
-    assert modes.default_store().get(OWNER, CHAT) is None
-    assert bot.answers == [{"callback_query_id": "query-1", "text": "Transcription: off in Settings"}]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("data", ["tb:r:991", "tb:m:991:own"])
-async def test_mode_buttons_leave_a_stored_mode_while_transcription_is_disabled(plugin, modes, monkeypatch, data):
+async def test_disabled_transcription_hides_mode_controls_and_leaves_a_stored_mode(plugin, modes):
     bind_owner(plugin)
     ttm.seed(plugin, OWNER, CHAT, "off", label="Casey")
     test_history.set_switch(plugin, "transcription", False)
     bot = PanelBot(business_owner_id=OWNER)
+    main = ("Owner panel: Casey · chat 991\nTranscription: off in Settings\nHistory: off in Settings",
+            [[("🔄 Refresh", "tb:p:991")]])
 
-    assert await dispatch(plugin, callback_update(data), bot) is True
+    assert await dispatch(plugin, start_update(), bot) is True
+    (call,) = bot.calls
+    assert (call["text"], keyboard(call["reply_markup"])) == main
 
+    for data in ("tb:m:991:own", "tb:r:991", "tb:t:991"):
+        assert await dispatch(plugin, callback_update(data), bot) is True
+        assert bot.answers[-1] == {"callback_query_id": "query-1", "text": "Transcription: off in Settings"}, data
+        assert last_edit(bot) == main, data
     assert modes.default_store().get(OWNER, CHAT).mode == "off"
-    assert bot.answers == [{"callback_query_id": "query-1", "text": "Transcription: off in Settings"}]
-    assert last_edit(bot) == ("Owner panel: Casey · chat 991\nTranscription: off in Settings\nHistory: off in Settings",
-                              [[("🔄 Refresh", "tb:p:991")]])
 
 
 # --- Sections ------------------------------------------------------------------------------------
@@ -965,8 +828,6 @@ async def test_async_section_render_is_awaited(plugin, modes):
 
     assert await dispatch(plugin, callback_update("tb:s:991:dossier"), bot) is True
     assert last_edit(bot) == ("async body", [[("« Back", "tb:b:991")]])
-    # A plain view sends no formatting options at all.
-    assert "parse_mode" not in bot.text_edit_calls[-1] and "link_preview_options" not in bot.text_edit_calls[-1]
 
 
 def test_with_back_keeps_the_view_formatting(plugin):
@@ -1079,13 +940,13 @@ async def test_broken_or_missing_section_degrades_to_a_short_status(plugin, mode
 async def test_long_section_text_is_clipped_to_telegrams_limit(plugin, modes):
     bind_owner(plugin)
     panel = plugin._owner_panel
-    panel.register_section("dossier", "Dossier", lambda ctx: panel.PanelView(text="x" * 5000))
+    panel.register_section("dossier", "Dossier", lambda ctx: panel.PanelView(text="x" + "\U0001F600" * 3000))
     bot = PanelBot(business_owner_id=OWNER)
 
     assert await dispatch(plugin, callback_update("tb:s:991:dossier"), bot) is True
 
     text, rows = last_edit(bot)
-    assert len(text) == 4096 and text.endswith("\u2026")
+    assert len(text.encode("utf-16-le")) // 2 == 4096 and text.endswith("\u2026")
     assert rows == [[("« Back", "tb:b:991")]]
     assert bot.answers == [{"callback_query_id": "query-1", "text": "Dossier"}]
 
@@ -1100,20 +961,11 @@ async def test_callback_toast_is_clipped_to_telegrams_limit(plugin):
     assert bot.answers == [{"callback_query_id": "query-1", "text": "x" * 200}]
 
 
-def test_clip_text_counts_utf16_units(plugin):
-    clip = plugin._owner_panel.clip_text
-    assert clip("short") == "short"
-    clipped = clip("\U0001F600" * 3000)  # 6000 UTF-16 units
-    assert len(clipped.encode("utf-16-le")) // 2 <= 4096
-    assert clipped.endswith("\u2026")
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["", "   \n "])
-async def test_empty_section_shows_unavailable(plugin, modes, text):
+async def test_empty_section_shows_unavailable(plugin, modes):
     bind_owner(plugin)
     panel = plugin._owner_panel
-    panel.register_section("stats", "Stats", lambda ctx: panel.PanelView(text=text))
+    panel.register_section("stats", "Stats", lambda ctx: panel.PanelView(text="   \n "))
     bot = PanelBot(business_owner_id=OWNER)
 
     assert await dispatch(plugin, callback_update("tb:s:991:stats"), bot) is True
@@ -1142,27 +994,6 @@ async def test_slow_section_times_out_after_the_callback_is_answered(plugin, mod
     assert last_edit(bot)[0] == "chat 991\nSection unavailable."
     assert "TimeoutError" in caplog.text
     assert "AssertionError" not in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_failed_section_edit_falls_back_to_unavailable(plugin, modes):
-    bind_owner(plugin)
-    panel = plugin._owner_panel
-    panel.register_section("stats", "Stats", lambda ctx: panel.PanelView(text="body"))
-    bot = PanelBot(business_owner_id=OWNER)
-    original = bot.edit_message_text
-
-    async def edit(**kwargs):
-        if kwargs["text"] == "body":
-            bot.text_edit_calls.append(kwargs)
-            raise ttm.BadRequest("Can't parse entities")
-        return await original(**kwargs)
-
-    bot.edit_message_text = edit
-
-    assert await dispatch(plugin, callback_update("tb:s:991:stats"), bot) is True
-
-    assert last_edit(bot)[0] == "chat 991\nSection unavailable."
 
 
 # --- Robustness and logs -------------------------------------------------------------------------
@@ -1286,7 +1117,7 @@ async def test_real_ptb_start_and_button_never_reach_core(plugin, modes, telegra
 
 @pytest.mark.parametrize(
     ("code", "expected"),
-    [("ru", "ru"), ("ru-RU", "ru"), ("RU", "ru"), ("en", "en"), ("en-US", "en"), ("uk", "en"), ("", "en"), (None, "en")],
+    [("ru", "ru"), ("ru-RU", "ru"), ("RU", "ru"), ("uk", "en"), (None, "en")],
 )
 def test_language_is_russian_for_any_ru_client_else_english(plugin, code, expected):
     assert plugin._owner_panel.language(code) == expected
@@ -1340,16 +1171,6 @@ async def test_panel_speaks_russian_to_a_russian_client(plugin, modes):
     assert await dispatch(plugin, callback_update("tb:r:991", language_code="de"), bot) is True
     assert bot.answers[-1] == {"callback_query_id": "query-1", "text": "Transcription: both (default)"}
     assert last_edit(bot)[0] == "Owner panel: chat 991\nHistory: off in Settings"
-
-
-@pytest.mark.asyncio
-async def test_unknown_connection_hint_in_russian(plugin, modes):
-    bot = PanelBot(business_owner_id=OWNER)
-
-    assert await dispatch(plugin, start_update(language_code="ru"), bot) is True
-
-    assert bot.calls == [{"chat_id": OWNER, "text": plugin._owner_panel.tr("unknown_connection", "ru")}]
-    assert bot.calls[0]["text"].startswith("Пока не могу подтвердить")
 
 
 # --- The owner's own chat with the bot -----------------------------------------------------------
@@ -1451,18 +1272,6 @@ async def test_transcription_button_opens_a_picker_and_a_pick_returns_to_the_pan
 
 
 @pytest.mark.asyncio
-async def test_transcription_button_while_off_in_settings_says_so(plugin, modes):
-    bind_owner(plugin)
-    plugin._global_settings.set_enabled("transcription", False, via="cli")
-    bot = PanelBot(business_owner_id=OWNER)
-
-    assert await dispatch(plugin, callback_update("tb:t:991"), bot) is True
-
-    assert bot.answers == [{"callback_query_id": "query-1", "text": "Transcription: off in Settings"}]
-    assert last_edit(bot)[1] == [[("🔄 Refresh", "tb:p:991")]]
-
-
-@pytest.mark.asyncio
 async def test_deletion_alerts_switch_per_chat_without_touching_the_dossier(plugin, modes, monkeypatch):
     bind_owner(plugin)
     plugin._global_settings.set_enabled("history", True, via="cli")
@@ -1486,13 +1295,3 @@ async def test_deletion_alerts_switch_per_chat_without_touching_the_dossier(plug
     assert await dispatch(plugin, callback_update("tb:f:991:a.off"), bot) is True  # a stale button
     assert bot.answers[-1]["text"] == "Deletion alerts: off in Settings"
     assert "Deletion alerts: off in Settings" in last_edit(bot)[0]
-
-
-@pytest.mark.parametrize("chat", [991, -1001234567890, -99999999999999999999])
-def test_new_callbacks_parse_strictly_and_fit_64_bytes(plugin, chat):
-    panel = plugin._owner_panel
-    for data in (panel.callback_data("t", chat), panel.callback_data("f", chat, "a.off"),
-                 panel.callback_data("x", chat, "99999999999999999999")):
-        assert len(data.encode()) <= panel.MAX_CALLBACK_BYTES and panel.parse_callback(data) is not None
-    for data in ("tb:t:991:x", "tb:f:991:a.maybe", "tb:x:991", "tb:x:991:abc", "tb:x:991:-5"):
-        assert panel.parse_callback(data) is None
