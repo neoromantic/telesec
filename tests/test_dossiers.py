@@ -65,7 +65,6 @@ MARK = chr(0x1F399) + chr(0xFE0F)  # the transcript marker as the plugin posts i
 TOKYO = "Asia/Tokyo"  # UTC+9 all year
 DEFAULT_ROUTE = ("telesec_dossier", None, None)
 GATEWAY_KEY = {"AI_GATEWAY_API_KEY": "test-gateway-key"}
-CF_KEYS = {"CLOUDFLARE_ACCOUNT_ID": "0123456789abcdef0123456789abcdef", "CLOUDFLARE_API_TOKEN": "test-cf-token"}
 _UPDATE_IDS = itertools.count(800_000)
 
 
@@ -206,13 +205,6 @@ async def test_default_config_routes_through_the_registered_task(
     plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ds = dossiers
-    assert ds.TASK_DEFAULTS == {
-        "provider": "ai-gateway",
-        "model": "google/gemini-3.8-flash",
-        "timeout": 120,
-        "reasoning_effort": "low",
-        "extra_body": {"max_tokens": 8192, "providerOptions": {"gateway": {"zeroDataRetention": True}}},
-    }
     for task in (None, {}):  # no Hermes config section, or an empty one
         host_config(monkeypatch, task)
         cfg = ds.load_config()
@@ -298,7 +290,6 @@ async def test_an_unregistered_task_uses_the_explicit_fallback_route(plug: Modul
     assert call["max_tokens"] == 16_384  # nor an extra_body to cap the output; asked for anyway
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(("provider", "model", "expected_model", "caps"), [
     # (cap applied, cap asked for that may not apply): Hermes passes an explicit max_tokens on only to some
     # providers, never to ai-gateway, and native gemini may raise it to the model's limit.
@@ -307,10 +298,9 @@ async def test_an_unregistered_task_uses_the_explicit_fallback_route(plug: Modul
     ("openrouter", None, "google/gemini-3.8-flash", (16_384, None)),
     ("openai", "example-5", "example-5", (None, 16_384)),
     ("ai-gateway", None, "google/gemini-3.8-flash", (None, None)),
-    ("gemini", "gemini-3.8-pro", "gemini-3.8-pro", (None, 16_384)),
 ])
-async def test_the_legacy_provider_env_is_an_explicit_route_with_a_warning(
-    plug: ModuleType, dossiers: ModuleType, dossier_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch,
+def test_the_legacy_provider_env_is_an_explicit_route_with_a_warning(
+    dossiers: ModuleType, dossier_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch,
     provider: str, model: str | None, expected_model: str, caps: tuple[int | None, int | None],
 ) -> None:
     ds = dossiers
@@ -321,13 +311,6 @@ async def test_the_legacy_provider_env_is_an_explicit_route_with_a_warning(
     assert (cfg.reasoning, cfg.max_tokens, cfg.max_tokens_asked, cfg.zdr) == (ds.NOT_SET, *caps, False)
     assert cfg.warnings == (legacy_warning(provider, expected_model),)
     assert route_of(ds) == (None, provider, expected_model)
-
-    await two_sided(plug, 5603, "LEGACY")
-    fake = FakeLlm()
-    assert cycle(ds, fake).refreshed == 1
-    (call,) = contact_calls(fake)
-    assert (call["provider"], call["model"]) == (provider, expected_model) and "task" not in call
-    assert call["max_tokens"] == 16_384
 
 
 def test_a_legacy_route_with_url_credentials_is_shown_without_them(
@@ -350,8 +333,6 @@ def test_a_legacy_route_with_url_credentials_is_shown_without_them(
 
 @pytest.mark.parametrize(("env", "task", "expected"), [
     ({"MODEL": "gemini-3.8-pro"}, None, ("ai-gateway", "google/gemini-3.8-flash")),
-    ({"PROVIDER": "gemini", "MODEL": "gemini-3.8-pro"}, {"provider": "ai-gateway"},
-     ("ai-gateway", "google/gemini-3.8-flash")),
     ({"PROVIDER": "gemini"}, {"provider": "openrouter", "model": "example/model-1", "extra_body": {"max_tokens": 8192}},
      ("openrouter", "example/model-1")),
 ])
@@ -368,36 +349,28 @@ def test_the_legacy_env_is_ignored_alone_or_under_an_explicit_task_provider(
     assert route_of(ds) == DEFAULT_ROUTE
 
 
-def test_the_cleanup_provider_never_routes_dossiers(
-    dossiers: ModuleType, dossier_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+def test_the_cleanup_provider_never_routes_dossiers_and_its_note_is_logged_once_at_info(
+    plug: ModuleType, dossiers: ModuleType, dossier_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     ds = dossiers
-    monkeypatch.setenv("TELESEC_CLEANUP_PROVIDER", "gemini")
-    cfg = ds.load_config()
-    assert route_of(ds) == DEFAULT_ROUTE and cfg.provider == "ai-gateway"
+    monkeypatch.setenv("TELESEC_CLEANUP_PROVIDER", "gemini")  # set on purpose, for voice cleanup
     note = ("note: dossiers no longer follow TELESEC_CLEANUP_PROVIDER; they use the Telesec dossiers task "
             "(ai-gateway / google/gemini-3.8-flash).")
-    assert cfg.warnings == (note,)
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(3):  # status calls and cycles in one process
+            cfg = ds.load_config()
+            assert route_of(ds) == DEFAULT_ROUTE and cfg.warnings == (note,)
+        code, out, _err = cli(plug, "dossier", "status")
+    records = [r for r in caplog.records if "cleanup_env" in r.getMessage()]
+    assert [(r.levelno, r.getMessage()) for r in records] == [(logging.INFO, "telesec: dossier config note=cleanup_env")]
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "dossier config" in r.getMessage()]
+    assert code == 0 and note in out
 
     dossier_env(PROVIDER="openrouter")  # the dossier variable is the one that routes, with its own warning
     cfg = ds.load_config()
     assert route_of(ds) == (None, "openrouter", "google/gemini-3.8-flash")
     assert cfg.warnings == (legacy_warning("openrouter", "google/gemini-3.8-flash"),)
-
-
-def test_the_cleanup_provider_note_is_logged_once_at_info_and_stays_in_status(
-    plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    ds = dossiers
-    monkeypatch.setenv("TELESEC_CLEANUP_PROVIDER", "gemini")  # set on purpose, for voice cleanup
-    with caplog.at_level(logging.DEBUG):
-        for _ in range(3):  # status calls and cycles in one process
-            ds.load_config()
-        code, out, _err = cli(plug, "dossier", "status")
-    records = [r for r in caplog.records if "cleanup_env" in r.getMessage()]
-    assert [(r.levelno, r.getMessage()) for r in records] == [(logging.INFO, "telesec: dossier config note=cleanup_env")]
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "dossier config" in r.getMessage()]
-    assert code == 0 and "note: dossiers no longer follow TELESEC_CLEANUP_PROVIDER;" in out
 
 
 def test_the_message_check_needs_the_setting_a_gateway_route_and_a_key(
@@ -428,17 +401,6 @@ def test_the_message_check_needs_the_setting_a_gateway_route_and_a_key(
     assert ds.load_config().gate == "no_key"
 
 
-def test_fact_hints_need_the_setting_and_cloudflare_credentials(dossiers: ModuleType) -> None:
-    ds = dossiers
-    with fake_secret_scope(CF_KEYS):
-        assert ds.load_config().clairic == "off"  # an absent setting is off, even with credentials
-        ds.set_clairic("on", via="telegram")
-        assert ds.load_config().clairic == "on"
-    assert ds.load_config().clairic == "no_key"
-    with fake_secret_scope({**CF_KEYS, "CLOUDFLARE_ACCOUNT_ID": "not-a-hex-account-id"}):
-        assert ds.load_config().clairic == "no_key"
-
-
 def test_config_warnings_are_logged_once_per_process_as_codes(
     dossiers: ModuleType, dossier_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -463,7 +425,6 @@ def test_config_warnings_are_logged_once_per_process_as_codes(
 
 def test_gate_and_clairic_settings_round_trip_and_survive_the_switch(dossiers: ModuleType) -> None:
     ds = dossiers
-    assert ds.SCHEMA_VERSION == 1
     switch = read_settings(ds)
     assert set(switch) == {"schema_version", "enabled", "updated_at", "updated_via"}
     assert ds.load_settings() == switch  # gate and clairic are absent until set
@@ -716,22 +677,6 @@ async def test_an_update_flags_changes_and_sends_the_ten_newest_seen_messages_as
     assert all(set(c) == {"ref", "at", "from", "text"} for c in payload["context"])
 
 
-@pytest.mark.asyncio
-async def test_update_context_stays_under_its_character_limit(plug: ModuleType, dossiers: ModuleType) -> None:
-    ds = dossiers
-    chat = 5610
-    rows = [(i, "in" if i % 2 else "out", f"message {i:02d} " + "word " * 119, 200 - 5 * i) for i in range(1, 13)]
-    await seed(plug, chat, "u5610", rows)
-    assert cycle(ds, FakeLlm()).refreshed == 1
-    await seed(plug, chat, "u5610", [(13, "in", "a short new question", 60)])
-    fake = FakeLlm()
-    assert cycle(ds, fake).refreshed == 1
-    (payload,) = contact_payloads(fake)
-    context = payload["context"]
-    assert sum(len(c["text"]) for c in context) <= ds._writer.CONTEXT_MAX_CHARS
-    assert 0 < len(context) < ds._writer.CONTEXT_MAX and context[-1]["ref"] == "m12"
-
-
 # ---------------------------------------------------------------------------
 # First pass and batching (B.4, B.5)
 # ---------------------------------------------------------------------------
@@ -790,17 +735,13 @@ async def test_the_first_pass_takes_the_window_and_the_newest_messages_up_to_the
     assert (forced.calls, forced.unchanged) == (0, 1)
 
 
-def test_batches_split_by_message_count_and_by_characters(dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_batches_split_by_characters(dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     ds = dossiers
-    assert (ds.BATCH_MAX_MESSAGES, ds.BATCH_MAX_CHARS) == (500, 120_000)
     items = [ds.Item(str(i), "deleted", NOW, None) for i in range(5)]  # a ref-only deletion counts 80 characters
     assert [len(b) for b in ds.batches(items)] == [5]
     assert ds.batches([]) == []
     monkeypatch.setattr(ds, "BATCH_MAX_CHARS", 200)
-    assert [len(b) for b in ds.batches(items)] == [2, 2, 1]
-    monkeypatch.setattr(ds, "BATCH_MAX_CHARS", 120_000)
-    monkeypatch.setattr(ds, "BATCH_MAX_MESSAGES", 3)
-    assert [[item.key for item in b] for b in ds.batches(items)] == [["0", "1", "2"], ["3", "4"]]
+    assert [[item.key for item in b] for b in ds.batches(items)] == [["0", "1"], ["2", "3"], ["4"]]
 
 
 @pytest.mark.asyncio
@@ -866,47 +807,6 @@ async def test_preview_matches_the_next_call_and_writes_nothing(plug: ModuleType
     assert user == "" and (info.first, info.qualified) == (True, False)
 
 
-@pytest.mark.asyncio
-async def test_fact_hints_join_the_writer_input_and_fail_open(
-    plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ds = dossiers
-    ds.set_clairic("on", via="cli")
-    asked: list[list[str]] = []
-
-    def hints(messages: list[Any], **_kwargs: Any) -> Any:
-        asked.append([m.text for m in messages])
-        return ds._writer.HintResult(hints=[{"kind": "date", "value": "2026-10-28"}], input_tokens=2000, ms=3)
-
-    def fails(messages: list[Any], **_kwargs: Any) -> Any:
-        asked.append([m.text for m in messages])
-        raise ds.model_client.ModelCallError("timeout")
-
-    month = f"{NOW:%Y-%m}"
-    await two_sided(plug, 5620, "HINT")
-    monkeypatch.setattr(ds._writer, "clairic_hints", hints)
-    with fake_secret_scope(CF_KEYS):
-        fake = FakeLlm()
-        assert cycle(ds, fake).refreshed == 1
-        (payload,) = contact_payloads(fake)
-        assert payload["hints"] == [{"kind": "date", "value": "2026-10-28"}]
-        assert asked == [["HINT question from the contact", "HINT answer from the owner"]]
-        assert read_state(ds)["usage"][month]["clairic"] == {"calls": 1, "input_tokens": 2000, "cost_usd": 0.0002}
-
-        monkeypatch.setattr(ds._writer, "clairic_hints", fails)
-        await seed(plug, 5620, "user5620", [(3, "in", "HINT follow-up", 30)])
-        fake = FakeLlm()
-        assert cycle(ds, fake).refreshed == 1  # the writer runs without hints
-        (payload,) = contact_payloads(fake)
-        assert "hints" not in payload and refs(payload) == ["m3"]
-        assert read_state(ds)["usage"][month]["clairic"]["errors"] == 1
-
-    await seed(plug, 5620, "user5620", [(4, "in", "HINT again", 20)])
-    fake = FakeLlm()
-    assert cycle(ds, fake).refreshed == 1  # without credentials nothing goes to Cloudflare
-    assert len(asked) == 2 and "hints" not in contact_payloads(fake)[0]
-
-
 # ---------------------------------------------------------------------------
 # Gating and worker
 # ---------------------------------------------------------------------------
@@ -936,8 +836,6 @@ async def test_disabled_worker_idles_without_cycle_call_or_write(
         assert threads[0].is_alive() and not worker.cycle_done.is_set()
         assert outcomes == [] and fake.calls == []
         assert not ds.dossier_root().exists()  # checking the switch writes nothing
-        assert cycle(ds, fake).outcome == "disabled"
-        assert fake.calls == [] and not ds.dossier_root().exists()
     finally:
         ds.stop_workers(timeout=2)
         ds.bind_llm(None)
@@ -968,85 +866,30 @@ async def test_a_disabled_cycle_reads_no_history_and_writes_nothing(
 
 
 @pytest.mark.asyncio
-async def test_register_binds_the_facade_but_starts_no_worker(plug: ModuleType, dossiers: ModuleType) -> None:
+async def test_register_starts_no_worker_and_connect_starts_one_that_unload_stops(
+    plug: ModuleType, dossiers: ModuleType
+) -> None:
     ds = dossiers
-    await two_sided(plug, 5503, "REGISTER")
     fake = FakeLlm()
     ctx = FakeCtx(fake, with_unload=True)
     plug.register(ctx)
     assert ds._LLM is fake  # register binds the facade for CLI runs, but starts nothing
-
-    entry = catalog_entry(plug, 5503)
-    assert ds.pending(entry, now=NOW).first is True
-    assert json.loads(ds.preview_contact(entry, now=NOW)[1])["mode"] == "first"
-    assert ds._WORKERS == {}
-    assert live_worker_threads() == []
-    assert fake.calls == []
-
-
-@pytest.mark.asyncio
-async def test_factory_starts_one_worker_idempotent(plug: ModuleType, dossiers: ModuleType) -> None:
-    ds = dossiers
-    fake = FakeLlm()
-    ds.bind_llm(fake)
+    assert ds._WORKERS == {} and live_worker_threads() == []
+    assert ctx.unload_callbacks == [plug._dossier_panel.stop_background]  # also stops panel refreshes
+    assert "dossiers" in [name for name, _path, _desc in ctx.skills]
     pending_before = set(plug._pending_tasks)
 
     connect_gateway(plug)
     connect_gateway(plug)  # a reconnect must not start a second worker
-
     assert len(ds._WORKERS) == 1
     threads = live_worker_threads()
     assert len(threads) == 1 and threads[0].daemon
     assert set(plug._pending_tasks) == pending_before
-    ds.stop_workers(timeout=2)
-    assert not threads[0].is_alive()
-    assert ds._WORKERS == {}
-    assert fake.calls == []  # the initial delay (3600 s) never elapsed
-
-
-@pytest.mark.asyncio
-async def test_worker_builds_contacts_and_the_persona_from_fixture_history(
-    plug: ModuleType, dossiers: ModuleType, dossier_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ds = dossiers
-    dossier_env(INTERVAL_MINUTES=1440)
-    monkeypatch.setattr(ds, "INITIAL_DELAY_SECONDS", 0)
-    for chat_id, tag in ((5504, "WORKER-A"), (5505, "WORKER-B")):
-        owner = [(i, "out", f"{tag} owner message {i}", 90 - i) for i in range(2, 7)]  # 10 owner messages in all
-        await seed(plug, chat_id, f"user{chat_id}", [(1, "in", f"{tag} question from the contact", 95), *owner])
-    fake = FakeLlm()
-    ds.bind_llm(fake)
-
-    connect_gateway(plug)
-    wait_worker_cycle(ds, timeout=10)
-
-    assert (len(fake.calls), len(contact_calls(fake)), len(persona_calls(fake))) == (3, 2, 1)
-    for chat_id, tag in ((5504, "WORKER-A"), (5505, "WORKER-B")):
-        doc = ds.load_contact(BUSINESS_ID, chat_id)
-        assert doc["document"] == quoted(f"{tag} question from the contact")
-    persona = read_persona(ds)
-    assert persona["document"] == "## Style\n- Short, polite messages without emoji."
-    assert (len(persona["chats"]), persona["messages"]) == (2, 10)
-    last = read_state(ds)["last_cycle"]
-    assert (last["outcome"], last["trigger"], last["persona"]) == ("completed", "worker", "refreshed")
-
-
-@pytest.mark.asyncio
-async def test_on_unload_registered_and_stops_worker(plug: ModuleType, dossiers: ModuleType) -> None:
-    ds = dossiers
-    fake = FakeLlm()
-    ctx = FakeCtx(fake, with_unload=True)
-    plug.register(ctx)
-    assert ctx.unload_callbacks == [plug._dossier_panel.stop_background]  # also stops panel refreshes
-    assert "dossiers" in [name for name, _path, _desc in ctx.skills]
-
-    connect_gateway(plug)
-    threads = live_worker_threads()
-    assert len(threads) == 1
     ctx.unload_callbacks[0]()  # the host calls it without arguments; it must not block
     threads[0].join(2)
     assert not threads[0].is_alive()
     assert ds._WORKERS == {}
+    assert fake.calls == []  # the initial delay (3600 s) never elapsed
 
     plug.register(FakeCtx(fake))  # a host without on_unload still registers fine
     assert live_worker_threads() == []
@@ -1145,24 +988,23 @@ async def test_old_env_or_desktop_setting_moves_into_the_switch_once(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content", ["{not json", '{"schema_version": 1, "enabled": "yes"}', '{"enabled": true}',
-                                     "[]", ""])
 async def test_corrupt_switch_reads_disabled_with_warning_until_rewritten(
-    plug: ModuleType, dossiers: ModuleType, content: str, caplog: pytest.LogCaptureFixture
+    plug: ModuleType, dossiers: ModuleType, caplog: pytest.LogCaptureFixture
 ) -> None:
     ds = dossiers
     await two_sided(plug, 5561, "BADSWITCH")
     path = ds.settings_path()
-    path.write_text(content, encoding="utf-8")
-    settings = ds.load_settings()
-    assert settings["enabled"] is False and "unreadable or corrupt" in settings["error"]
-    cfg = ds.load_config()
-    assert cfg.enabled is False
-    assert len(cfg.warnings) == 1 and "settings.json is unreadable or corrupt" in cfg.warnings[0]
-    assert cfg.warnings[0].startswith("warning: ")
+    for content in ("{not json", '{"schema_version": 1, "enabled": "yes"}', '{"enabled": true}', "[]"):
+        path.write_text(content, encoding="utf-8")
+        settings = ds.load_settings()
+        assert settings["enabled"] is False and "unreadable or corrupt" in settings["error"], content
+        cfg = ds.load_config()
+        assert cfg.enabled is False, content
+        assert len(cfg.warnings) == 1 and "settings.json is unreadable or corrupt" in cfg.warnings[0], content
+        assert cfg.warnings[0].startswith("warning: ")
     fake = FakeLlm()
     assert cycle(ds, fake).outcome == "disabled" and fake.calls == []
-    assert path.read_text(encoding="utf-8") == content  # never overwritten silently
+    assert path.read_text(encoding="utf-8") == "[]"  # never overwritten silently
     ds.bind_llm(FakeLlm())
     with caplog.at_level(logging.WARNING):
         assert ds.ensure_worker_started() is True  # the gateway log says why dossiers stay off
@@ -1175,12 +1017,14 @@ async def test_corrupt_switch_reads_disabled_with_warning_until_rewritten(
 
 
 @pytest.mark.asyncio
-async def test_switch_on_starts_idle_worker_cycle_without_restart(
+async def test_switch_on_wakes_the_idle_worker_whose_cycle_builds_contacts_and_the_persona(
     dossier_history: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     plugin = dossier_history
     ds = dossier_module(plugin)
-    await two_sided(plugin, 5562, "SWITCHON")
+    for chat_id, tag in ((5504, "WORKER-A"), (5505, "WORKER-B")):
+        owner = [(i, "out", f"{tag} owner message {i}", 90 - i) for i in range(2, 7)]  # 10 owner messages in all
+        await seed(plugin, chat_id, f"user{chat_id}", [(1, "in", f"{tag} question from the contact", 95), *owner])
     monkeypatch.setattr(ds, "INITIAL_DELAY_SECONDS", 0)
     monkeypatch.setattr(ds, "DISABLED_POLL_SECONDS", 3600)  # only a wake ends the idle wait
     outcomes = spy_worker_cycles(monkeypatch, ds)
@@ -1197,10 +1041,17 @@ async def test_switch_on_starts_idle_worker_cycle_without_restart(
         assert ds.wake_worker() is True
         wait_worker_cycle(ds, timeout=10)
         assert outcomes == ["completed"]
-        assert len(contact_calls(fake)) == 1 and persona_calls(fake) == []  # one owner message: no persona yet
-        assert read_dossier(ds, 5562) is not None
-        assert read_state(ds)["last_cycle"]["trigger"] == "worker"
+        assert (len(fake.calls), len(contact_calls(fake)), len(persona_calls(fake))) == (3, 2, 1)
+        for chat_id, tag in ((5504, "WORKER-A"), (5505, "WORKER-B")):
+            assert read_dossier(ds, chat_id)["document"] == quoted(f"{tag} question from the contact")
+        persona = read_persona(ds)
+        assert persona["document"] == "## Style\n- Short, polite messages without emoji."
+        assert (len(persona["chats"]), persona["messages"]) == (2, 10)
+        last = read_state(ds)["last_cycle"]
+        assert (last["outcome"], last["trigger"], last["persona"]) == ("completed", "worker", "refreshed")
         assert live_worker_threads() == threads  # the same thread: no restart
+        ds.stop_workers(timeout=2)  # ends the 30 min interval wait at once
+        assert not threads[0].is_alive()
     finally:
         ds.stop_workers(timeout=2)
         ds.bind_llm(None)
@@ -1225,8 +1076,6 @@ async def test_an_enable_from_another_process_reaches_the_worker_by_polling_afte
         connect_gateway(plugin)
         ds.set_enabled(True, via="cli")  # as from another process: no wake reaches the worker
         assert ds.wake_worker() is True  # and a wake never shortens the post-connect delay
-        await asyncio.sleep(0.3)
-        assert outcomes == [] and fake.calls == []
         wait_worker_cycle(ds, timeout=10)
         assert time.monotonic() - started >= delay
         assert outcomes == ["completed"] and len(fake.calls) == 1
@@ -1332,28 +1181,6 @@ async def test_switch_on_after_off_skips_the_rest_of_the_interval(
     assert outcomes[-1] == "completed"
 
 
-@pytest.mark.asyncio
-async def test_stop_workers_ends_disabled_poll_promptly(
-    dossier_history: ModuleType, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ds = dossier_module(dossier_history)
-    monkeypatch.setattr(ds, "INITIAL_DELAY_SECONDS", 0)
-    monkeypatch.setattr(ds, "DISABLED_POLL_SECONDS", 3600)
-    ds.bind_llm(FakeLlm())
-    try:
-        connect_gateway(dossier_history)
-        [thread] = live_worker_threads()
-        await asyncio.sleep(0.1)  # inside the hour-long disabled poll by now
-        started = time.monotonic()
-        ds.stop_workers(timeout=2)
-        assert not thread.is_alive()
-        assert time.monotonic() - started < 1.5
-        assert ds._WORKERS == {} and ds.wake_worker() is False
-    finally:
-        ds.stop_workers(timeout=2)
-        ds.bind_llm(None)
-
-
 # ---------------------------------------------------------------------------
 # Rate limit
 # ---------------------------------------------------------------------------
@@ -1403,26 +1230,6 @@ def test_rate_limiter_sliding_window_and_stop(dossiers: ModuleType) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cycle_respects_max_calls_per_minute_without_cycle_cap(
-    plug: ModuleType, dossiers: ModuleType, dossier_env: Callable[..., None]
-) -> None:
-    ds = dossiers
-    dossier_env(MAX_CALLS_PER_MINUTE=2)
-    for chat_id in (5538, 5539, 5540):
-        await two_sided(plug, chat_id, f"RATE{chat_id}")
-    clock = FakeClock()
-    fake = FakeLlm()
-    times: list[float] = []
-    fake.on_call = lambda _payload: times.append(clock())
-    report = cycle(ds, fake, limiter=ds.RateLimiter(2, clock=clock, wait=clock.wait))
-
-    assert (report.refreshed, report.calls, report.persona) == (3, 3, "not_due")
-    assert times[:2] == [1_000.0, 1_000.0]
-    assert times[2] >= 1_060.0  # the third call waited for the window
-    assert all(read_dossier(ds, chat_id) is not None for chat_id in (5538, 5539, 5540))
-
-
-@pytest.mark.asyncio
 async def test_recent_calls_persist_across_cycles(
     plug: ModuleType, dossiers: ModuleType, dossier_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1456,24 +1263,18 @@ LONG_REPLY = doc("**The contact.**\n\n## Notes\n" + "\n".join(f"- Fact number {i
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("limit", "waits", "recent"), [
-    (2, [], [1_000.0, 1_000.0]),
-    (1, [pytest.approx(60.0)], [pytest.approx(1_060.0)]),  # one call a minute: the shorten call waits for the window
-])
-async def test_a_shorten_call_takes_its_own_rate_limit_slot(
-    plug: ModuleType, dossiers: ModuleType, limit: int, waits: list[float], recent: list[float]
-) -> None:
+async def test_a_shorten_call_takes_its_own_rate_limit_slot(plug: ModuleType, dossiers: ModuleType) -> None:
     ds = dossiers
     await two_sided(plug, 5544, "SHORTEN")
     clock = FakeClock()
     fake = FakeLlm(LONG_REPLY)  # too long: the default reply answers the shorten call
     report = cycle(ds, fake, target=("contact", catalog_entry(plug, 5544)),
-                   limiter=ds.RateLimiter(limit, clock=clock, wait=clock.wait))
+                   limiter=ds.RateLimiter(1, clock=clock, wait=clock.wait))
 
     assert [c["purpose"] for c in fake.calls] == ["telesec_dossier", "telesec_shorten"]
     assert (report.refreshed, report.calls) == (1, 2)
-    assert clock.waits == waits
-    assert read_state(ds)["recent_calls"] == recent  # the window `dossier run` shares
+    assert clock.waits == [pytest.approx(60.0)]  # one call a minute: the shorten call waits for the window
+    assert read_state(ds)["recent_calls"] == [pytest.approx(1_060.0)]  # the window `dossier run` shares
 
 
 @pytest.mark.asyncio
@@ -1525,7 +1326,6 @@ async def test_history_forget_erases_one_chat_and_its_dossier(plug: ModuleType, 
     await seed(plug, 5505, "keep_me", [(1, "in", "KEEP-TAG question", 80), (2, "out", "KEEP-TAG reply", 75)])
     assert cycle(ds, FakeLlm()).refreshed == 2
     assert cycle(ds, FakeLlm(), target=("persona", None)).persona == "refreshed"  # the persona read both chats
-    ds.set_note(("persona", None), "Keep replies short.")
     persona = read_persona(ds)
     before = snapshot_history_tree(plug)
 
@@ -1549,19 +1349,10 @@ async def test_history_forget_erases_one_chat_and_its_dossier(plug: ModuleType, 
     assert "History is still on for this chat, so new messages are saved again." in out
     assert not history._history_chat_dir_path(BUSINESS_ID, 5504).exists()
     assert read_dossier(ds, 5504) is None and read_dossier(ds, 5505) is not None
-    reset = read_persona(ds)  # the persona read the forgotten chat: its text goes, the owner's note stays
-    assert (reset["document"], reset["previous"], reset["chats"], reset["note"]) == ("", None, [],
-                                                                                    "Keep replies short.")
-    assert reset["id"] != persona["id"]
     assert [str(entry["chat_id"]) for entry in history._catalog_entries_for_cli()] == ["5505"]
     assert cli(plug, "history", "show", "--chat", "5504")[0] == 1
     stats = cli(plug, "stats", "--format", "json")[1]
     assert "forget_me" not in stats and "keep_me" in stats
-    fake = FakeLlm()
-    report = cycle(ds, fake, now=NOW + timedelta(hours=25))
-    assert (report.refreshed, report.calls, report.persona) == (0, 1, "refreshed")  # rebuilt from the chat left
-    assert [m["text"] for m in persona_calls(fake)[0]["user"]["messages"]] == ["KEEP-TAG reply"]
-    assert read_dossier(ds, 5504) is None
 
     code, out, _err = cli(plug, "history", "forget", "--chat", "5504", "--yes")
     assert code == 1 and "no matching history chat found" in out

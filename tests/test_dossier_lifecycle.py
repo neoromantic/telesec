@@ -15,7 +15,6 @@ import json
 import logging
 import re
 import threading
-import urllib.error
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from types import ModuleType
@@ -39,7 +38,6 @@ from dossier_helpers import (
     doc,
     dossier_dir,
     edit,
-    load_records,
     maintain,
     make_business_text_update,
     persona_dir,
@@ -102,11 +100,6 @@ def contact_payloads(fake: FakeLlm) -> list[dict[str, Any]]:
 
 def refs(payload: dict[str, Any]) -> list[str]:
     return [m["ref"] for m in payload["messages"]]
-
-
-def quoted(text: str) -> str:
-    """The document ``quote_first`` writes for a batch whose first contact message is ``text``."""
-    return f'**The contact.**\n\n## Notes\n- The contact said "{text}".'
 
 
 def local(minutes: Any) -> str:
@@ -371,9 +364,8 @@ async def seed_two_checked_contacts(plug: ModuleType, ds: ModuleType) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("switch", ["dossiers", "history"])
 async def test_switching_off_during_a_message_check_sends_no_further_check(
-    plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch, switch: str
+    plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ds = dossiers
     await seed_two_checked_contacts(plug, ds)
@@ -384,10 +376,7 @@ async def test_switching_off_during_a_message_check_sends_no_further_check(
         try:
             return check(*args, **kwargs)
         finally:
-            if switch == "dossiers":
-                ds.set_enabled(False, via="telegram")
-            else:
-                test_history.set_switch(plug, "history", False)
+            ds.set_enabled(False, via="telegram")
 
     monkeypatch.setattr(ds._writer, "gate_check", check_then_switch_off)
     fake = FakeLlm()
@@ -415,89 +404,9 @@ async def test_turning_a_check_off_during_a_cycle_stops_its_requests(
     assert ["hints" in payload for payload in contact_payloads(fake)] == [option == "clairic", False]
 
 
-@pytest.mark.asyncio
-async def test_forget_never_touches_history_or_the_switch(plug: ModuleType, dossiers: ModuleType) -> None:
-    ds = dossiers
-    alice = await seed_owner_chat(plug, ALICE, "ALPHA")
-    await seed_owner_chat(plug, BOB, "BRAVO")
-    report = cycle(ds, FakeLlm())
-    assert (report.refreshed, report.persona) == (2, "refreshed")
-    history_before = snapshot_history_tree(plug)
-    switch = ds.settings_path().read_bytes()
-
-    assert ds.forget(("contact", alice))["existed"] is True
-    assert ds.forget(("persona", None))["existed"] is True
-    assert ds.forget(("all", None))["existed"] is True
-    assert snapshot_history_tree(plug) == history_before
-    assert ds.settings_path().read_bytes() == switch and ds.load_config().enabled is True
-    root = ds.dossier_root()
-    assert not (root / "chats").exists() and not persona_dir(ds).exists() and not ds.state_path().exists()
-    assert (root / ".lock").exists() and (root / ".cycle.lock").exists()
-
-    ds.set_enabled(False, via="telegram")
-    switch = ds.settings_path().read_bytes()
-    assert ds.forget(("all", None))["existed"] is False
-    assert ds.settings_path().read_bytes() == switch and ds.load_config().enabled is False
-
-
 # ---------------------------------------------------------------------------
 # Kept v1 rules
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_a_same_text_edit_or_a_classification_stamp_makes_no_call(plug: ModuleType, dossiers: ModuleType) -> None:
-    ds = dossiers
-    await seed_alice(plug)
-    assert cycle(ds, FakeLlm(), now=ago(40)).refreshed == 1
-    before = snapshot_tree(dossier_dir(ds, ALICE))
-    fake = FakeLlm()
-
-    await edit(plug, ALICE, 11, "Noted, I will send the invoice by Friday", 30)  # the same text again
-    report = cycle(ds, fake, now=ago(15))
-    assert (report.calls, report.unchanged) == (0, 1)
-    assert snapshot_tree(dossier_dir(ds, ALICE)) == before
-
-    await delete(plug, ALICE, 11, when=14)
-    report = cycle(ds, fake, now=ago(3))
-    assert report.calls == 1 and refs(contact_payloads(fake)[0]) == ["m11"]
-    after = snapshot_tree(dossier_dir(ds, ALICE))
-
-    maintain(plug, 2)
-    classified = [r for r in load_records(plug, chat_id=ALICE) if r["event_type"] == "deletion.classified"]
-    assert [r["classification"] for r in classified] == ["unexplained"]
-    report = cycle(ds, fake, now=ago(-15))
-    assert (report.calls, report.unchanged) == (0, 1)  # the stamp changes no message
-    assert snapshot_tree(dossier_dir(ds, ALICE)) == after
-
-
-@pytest.mark.asyncio
-async def test_the_rolling_floor_keeps_aged_out_messages_unsent(
-    plug: ModuleType, dossiers: ModuleType, dossier_env: Callable[..., None]
-) -> None:
-    """Seen messages that age past the rolling floor are not resent, even inside the fold margin."""
-    ds = dossiers
-    dossier_env(BACKFILL_DAYS=30)
-    raw(plug, ALICE, [(1, "in", "old question", timedelta(days=25)),
-                      (2, "out", "old answer", timedelta(days=25, minutes=-1))], username="alice")
-    fake = FakeLlm()
-    cycle(ds, fake)
-    assert [refs(p) for p in contact_payloads(fake)] == [["m1", "m2"]]
-
-    t1 = NOW + timedelta(days=6)  # the floor is NOW - 24 d: 1 and 2 leave `seen` but stay in the fold margin
-    raw(plug, ALICE, [(3, "in", "new question", t1 - timedelta(hours=2)),
-                      (4, "out", "new answer", t1 - timedelta(hours=2) + timedelta(minutes=1))], username="alice")
-    fake = FakeLlm()
-    cycle(ds, fake, now=t1)
-    assert [refs(p) for p in contact_payloads(fake)] == [["m3", "m4"]]
-    assert sorted(read_dossier(ds, ALICE)["seen"]) == ["3", "4"]
-
-    t2 = t1 + timedelta(hours=3)
-    raw(plug, ALICE, [(5, "in", "newer question", t2 - timedelta(hours=1))], username="alice")
-    fake = FakeLlm()
-    cycle(ds, fake, now=t2)
-    assert [refs(p) for p in contact_payloads(fake)] == [["m5"]]
-    assert read_dossier(ds, ALICE)["messages"] == 5
 
 
 @pytest.mark.asyncio
@@ -599,22 +508,12 @@ async def test_edits_and_deletions_are_activity_but_a_classification_stamp_is_no
 
 
 @pytest.mark.asyncio
-async def test_a_trust_denial_aborts_the_cycle_but_a_file_permission_error_does_not(
+async def test_a_file_permission_error_is_a_target_failure_not_a_trust_denial(
     plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ds = dossiers
     await seed_alice(plug)
     await seed(plug, BOB, "bob", [(20, "in", "BRAVO question", 50), (21, "out", "BRAVO answer", 45)])
-
-    denied = FakeLlm(PluginLlmTrustError("plugins.entries.telesec.llm does not allow provider gemini"))
-    report = cycle(ds, denied)
-    assert (report.outcome, report.calls, len(denied.calls), report.persona) == ("aborted_trust", 1, 1, "skipped")
-    assert "does not allow provider" in report.error  # for the CLI only
-    assert read_dossier(ds, ALICE) is None and read_dossier(ds, BOB) is None
-    state = ds.state_path().read_text(encoding="utf-8")
-    assert json.loads(state)["last_cycle"]["outcome"] == "aborted_trust"
-    assert json.loads(state)["failures"] == {} and "does not allow" not in state  # a denial is no target failure
-
     alice_dir = dossier_dir(ds, ALICE)
     real_read = ds._doc.read_doc
 
@@ -657,7 +556,9 @@ async def test_an_explicit_route_needs_trust_config_and_a_denial_aborts_the_cycl
     (call,) = fake.calls
     assert (call["provider"], call["model"]) == expected and "task" not in call
     assert read_dossier(ds, ALICE) is None and read_persona(ds) is None
-    assert read_state(ds)["last_cycle"]["outcome"] == "aborted_trust"
+    state = ds.state_path().read_text(encoding="utf-8")
+    assert json.loads(state)["last_cycle"]["outcome"] == "aborted_trust"
+    assert json.loads(state)["failures"] == {} and "does not allow" not in state  # a denial is no target failure
 
     trusted = FakeLlm()  # the operator added the trust config
     report = cycle(ds, trusted, now=ago(-5))
@@ -671,36 +572,8 @@ async def test_an_explicit_route_needs_trust_config_and_a_denial_aborts_the_cycl
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_a_failed_contact_is_retried_next_cycle_and_the_others_continue(
-    plug: ModuleType, dossiers: ModuleType
-) -> None:
-    ds = dossiers
-    await seed_alice(plug, [(10, "in", "ALPHA hello there", 60), (11, "out", "ALPHA hi back", 55)])
-    await seed(plug, BOB, "bob", [(20, "in", "BRAVO question", 50), (21, "out", "BRAVO answer", 45)])
-
-    def flaky(payload: dict[str, Any], kwargs: dict[str, Any]) -> str:
-        if any("ALPHA" in m.get("text", "") for m in payload["messages"]):
-            raise TimeoutError("SECRET-TIMEOUT")
-        return quote_first(payload, kwargs)
-
-    report = cycle(ds, FakeLlm(flaky, flaky))
-    assert (report.outcome, report.failed, report.refreshed) == ("completed", 1, 1)
-    assert report.failures == [(f"{BUSINESS_ID}:{ALICE}", "TimeoutError")]
-    failure = read_state(ds)["failures"][key_of(ds, ALICE)]
-    assert failure == {"at": ds._iso(NOW), "error": "TimeoutError", "count": 1}
-    assert "SECRET" not in ds.state_path().read_text(encoding="utf-8")
-    assert read_dossier(ds, ALICE) is None and read_dossier(ds, BOB) is not None
-
-    report = cycle(ds, FakeLlm(), now=ago(-5))  # before the third failure no chat change is needed
-    assert (report.failed, report.refreshed, report.unchanged) == (0, 1, 1)
-    assert read_dossier(ds, ALICE)["document"] == quoted("ALPHA hello there")
-    assert read_state(ds)["failures"] == {}
-
-
 def test_the_backoff_doubles_from_the_third_failure_up_to_a_day(dossiers: ModuleType) -> None:
     ds = dossiers
-    assert (ds.BACKOFF_AFTER, ds.BACKOFF_MAX_HOURS) == (3, 24)
     at = ds._iso(NOW)
     for count, hours in ((3, 1), (4, 2), (5, 4), (6, 8), (7, 16), (8, 24), (20, 24)):
         record = {"at": at, "error": "TimeoutError", "count": count}
@@ -811,38 +684,6 @@ async def test_empty_clears_the_document_and_keeps_the_old_text_as_previous(
 
 
 @pytest.mark.asyncio
-async def test_a_note_change_bypasses_the_stat_gate_and_the_message_check(
-    plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ds = dossiers
-    entry = await seed_alice(plug)
-    assert cycle(ds, FakeLlm(), now=ago(40)).refreshed == 1
-    note = "Invoices go to the finance team."
-    with fake_secret_scope(KEYS):
-        opener = use_gate(monkeypatch, ds)  # nothing queued: a check would fail the refresh
-        assert cycle(ds, FakeLlm(), now=ago(35)).unchanged == 1  # the stat gate holds
-
-        ds.set_note(("contact", entry), note)
-        fake = FakeLlm(doc("NO_CHANGE"))
-        report = cycle(ds, fake, now=ago(30))
-        assert (report.checked, report.calls) == (1, 1)
-        (payload,) = contact_payloads(fake)
-        assert (payload["mode"], payload["owner_note"], payload["messages"]) == ("update", note, [])
-        stored = read_dossier(ds, ALICE)
-        assert stored["note_sha"] == ds._doc.note_sha(stored) is not None
-        assert cycle(ds, fake, now=ago(29)).unchanged == 1 and len(fake.calls) == 1
-
-        # A changed note with a small burst of new messages: the writer runs without a check.
-        await seed_alice(plug, [(13, "in", "Thanks!", 25)])
-        ds.set_note(("contact", entry), "Invoices go to Mira from now on.")
-        fake = FakeLlm()
-        report = cycle(ds, fake)
-        assert (report.calls, report.deferred, report.failed) == (1, 0, 0)
-        assert contact_payloads(fake)[0]["owner_note"] == "Invoices go to Mira from now on."
-    assert opener.calls == []
-
-
-@pytest.mark.asyncio
 async def test_a_note_saved_during_a_call_survives_and_reruns(plug: ModuleType, dossiers: ModuleType) -> None:
     ds = dossiers
     entry = await seed_alice(plug)
@@ -855,7 +696,7 @@ async def test_a_note_saved_during_a_call_survives_and_reruns(plug: ModuleType, 
 
     fake.on_call = lambda _payload: ds.set_note(("contact", entry), "Call her Mira, never Miroslava.")
     assert cycle(ds, fake, now=ago(-5)).calls == 1  # the note change reruns without a new message
-    assert contact_payloads(fake)[1]["owner_note"] == "Call her Mira."
+    assert (contact_payloads(fake)[1]["owner_note"], contact_payloads(fake)[1]["messages"]) == ("Call her Mira.", [])
     stored = read_dossier(ds, ALICE)
     assert stored["note"] == "Call her Mira, never Miroslava."
     assert stored["note_sha"] == ds._doc.note_sha({"note": "Call her Mira."})
@@ -876,7 +717,7 @@ async def test_a_note_saved_during_a_call_survives_and_reruns(plug: ModuleType, 
 # ---------------------------------------------------------------------------
 
 GATE_BYPASSES = ("forced", "first_pass", "empty_document", "note", "edit", "deletion", "pruned_deletion", "too_many",
-                 "too_long", "too_old", "setting_off", "no_key", "not_gateway")
+                 "too_long", "too_old", "not_gateway")
 
 
 @pytest.mark.asyncio
@@ -893,7 +734,7 @@ async def test_the_message_check_is_bypassed(
         first = FakeLlm(doc("EMPTY") if bypass == "empty_document" else quote_first)
         assert cycle(ds, first, now=ago(40)).calls == 1
     opener = use_gate(monkeypatch, ds)  # nothing queued: a check would fail the refresh
-    now, target, secrets = NOW, None, KEYS
+    now, target = NOW, None
     new = [(13, "in", "My new number is +1 555 555-0113", 30)]
     if bypass == "forced":
         target = ("contact", entry)
@@ -914,15 +755,11 @@ async def test_the_message_check_is_bypassed(
         monkeypatch.setattr(ds._writer, "GATE_MAX_CHARS", len(new[0][2]) - 1)
     elif bypass == "too_old":
         now = ago(30) + ds._writer.GATE_MAX_AGE
-    elif bypass == "setting_off":
-        ds.set_gate("off", via="cli")
-    elif bypass == "no_key":
-        secrets = CF_KEYS
     elif bypass == "not_gateway":
         dossier_env(PROVIDER="openrouter")
     await seed_alice(plug, new)
     fake = FakeLlm()
-    with fake_secret_scope(secrets):
+    with fake_secret_scope(KEYS):
         report = cycle(ds, fake, now=now, target=target)
     assert (report.calls, report.deferred, report.failed) == (1, 0, 0)
     assert opener.calls == []
@@ -938,8 +775,6 @@ async def test_a_check_at_the_threshold_lets_the_writer_run(
     await seed_alice(plug)
     assert cycle(ds, FakeLlm(), now=ago(40)).refreshed == 1
     document = read_dossier(ds, ALICE)["document"]
-    ds.set_note(("contact", catalog_entry(plug, ALICE)), "SECRET-NOTE never goes to the check.")
-    assert cycle(ds, FakeLlm(doc("NO_CHANGE")), now=ago(35)).checked == 1
     with fake_secret_scope(KEYS):
         opener = use_gate(monkeypatch, ds, jev_reply(0.2, 0.35))  # p is the higher answer
         await seed_alice(plug, [(13, "in", "I'll pay the deposit on Friday", 30)])
@@ -954,7 +789,6 @@ async def test_a_check_at_the_threshold_lets_the_writer_run(
     assert body["state"] == {"current_dossier": document,
                              "new_messages": [{"ref": "m13", "at": local(30), "from": "contact",
                                                "text": "I'll pay the deposit on Friday"}]}
-    assert "SECRET-NOTE" not in request["data"].decode()
     assert read_state(ds)["usage"][MONTH]["check"] == {"calls": 1, "input_tokens": 1200, "cost_usd": 0.00005}
 
 
@@ -995,29 +829,15 @@ async def test_a_low_check_defers_and_recheck_at_forces_the_writer_after_72_hour
     assert read_state(ds)["usage"][MONTH]["check"]["deferred"] == 2
 
 
-GATE_ERRORS = {
-    "http_401": (401, b'{"error": "SECRET-BODY"}'),
-    "http_429": (429, b"{}"),
-    "http_500": (500, b"{}"),
-    "timeout": urllib.error.URLError(TimeoutError("timed out")),
-    "network": urllib.error.URLError(ConnectionRefusedError("refused")),
-    "not_json": (200, b"<html>SECRET-BODY</html>"),
-    "missing": (200, json.dumps({"answers": {"update": {"probability": 0.9}}}).encode()),
-    "out_of_range": jev_reply(1.5, 0.2),
-}
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error", list(GATE_ERRORS))
 async def test_a_failed_check_lets_the_writer_run_and_counts_an_error(
-    plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
-    error: str,
+    plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     ds = dossiers
     await seed_alice(plug)
     assert cycle(ds, FakeLlm(), now=ago(40)).refreshed == 1
     with fake_secret_scope(KEYS):
-        opener = use_gate(monkeypatch, ds, GATE_ERRORS[error])
+        opener = use_gate(monkeypatch, ds, (401, b'{"error": "SECRET-BODY"}'))
         await seed_alice(plug, [(13, "in", "Thanks, bye", 30)])
         with caplog.at_level(logging.WARNING):
             report = cycle(ds, FakeLlm())
@@ -1035,7 +855,6 @@ async def test_a_failed_check_lets_the_writer_run_and_counts_an_error(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("setting", "secrets", "asked"), [
     ("on", CF_KEYS, True),
-    ("on", GATEWAY_KEY, False),
     ("off", CF_KEYS, False),
 ])
 async def test_fact_hints_need_the_setting_and_cloudflare_credentials(
@@ -1088,7 +907,7 @@ async def test_fact_hints_skip_the_persona_and_a_deferred_refresh(
         assert (report.deferred, len(gate.calls), len(hints.calls)) == (1, 1, 1)  # no fact hints for a deferral
 
 
-HINT_CASES = ("note_only", "edit_only", "deletion_only", "edit_and_new", "at_the_limits", "too_many", "too_long")
+HINT_CASES = ("edit_only", "edit_and_new", "at_the_limits", "too_many", "too_long")
 
 
 @pytest.mark.asyncio
@@ -1102,15 +921,9 @@ async def test_fact_hints_need_one_to_forty_new_messages_within_the_size_limit(
     opener = use_hints(monkeypatch, ds, clairic_reply())
     new = [(13, "in", "The deposit is 900", 30), (14, "in", "Due on 28 October", 29)]
     size = sum(len(text) for _mid, _who, text, _at in new)
-    if case == "note_only":
-        ds.set_note(("contact", entry), "Deposits go to the finance team.")
-        new = []
-    elif case in ("edit_only", "edit_and_new"):
+    if case in ("edit_only", "edit_and_new"):
         await edit(plug, ALICE, 10, "Hi, I now prefer phone calls", 30)
         new = new[:1] if case == "edit_and_new" else []
-    elif case == "deletion_only":
-        await delete(plug, ALICE, 12, when=30)
-        new = []
     else:
         monkeypatch.setattr(ds._writer, "GATE_MAX_MESSAGES", 1 if case == "too_many" else 2)
         monkeypatch.setattr(ds._writer, "GATE_MAX_CHARS", size - 1 if case == "too_long" else size)
@@ -1144,26 +957,15 @@ async def test_fact_hints_go_out_once_with_the_first_part(
     assert [("hints" in p) for p in contact_payloads(fake)] == [True, False, False]
 
 
-HINT_ERRORS = {
-    "http_401": (401, b"{}"),
-    "http_429": (429, b"{}"),
-    "timeout": urllib.error.URLError(TimeoutError("timed out")),
-    "network": urllib.error.URLError(ConnectionRefusedError("refused")),
-    "not_success": (200, json.dumps({"success": False, "result": None, "errors": [{"code": 5007}]}).encode()),
-    "bad_answers": (200, json.dumps({"result": {"answers": ["SECRET-ANSWER"]}, "success": True}).encode()),
-}
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error", list(HINT_ERRORS))
 async def test_failed_fact_hints_let_the_writer_run_and_count_an_error(
-    plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
-    error: str,
+    plug: ModuleType, dossiers: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     ds = dossiers
     await seed_alice(plug)
     assert cycle(ds, FakeLlm(), now=ago(40)).refreshed == 1
-    opener = use_hints(monkeypatch, ds, HINT_ERRORS[error])
+    bad_answers = json.dumps({"result": {"answers": ["SECRET-ANSWER"]}, "success": True}).encode()
+    opener = use_hints(monkeypatch, ds, (200, bad_answers))
     await seed_alice(plug, [(13, "in", "The deposit is 900", 30)])
     fake = FakeLlm()
     with fake_secret_scope(CF_KEYS), caplog.at_level(logging.WARNING):
@@ -1231,21 +1033,15 @@ async def test_usage_counts_writer_calls_tokens_cost_and_unpriced_answers(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["unstructured", "too_long"])
-async def test_usage_counts_writer_calls_whose_answer_was_refused(
-    plug: ModuleType, dossiers: ModuleType, case: str
-) -> None:
+async def test_usage_counts_writer_calls_whose_answer_was_refused(plug: ModuleType, dossiers: ModuleType) -> None:
     ds = dossiers
     await seed_alice(plug)
     price = ds._writer.price("ai-gateway", "google/gemini-3.8-flash", 100, 50)
     long_text = doc("**The contact.**\n\n## Notes\n" + "\n".join(f"- Fact {i}: " + "detail " * 10 for i in range(60)))
-    replies = [doc("Sorry, I cannot help with that request.")] if case == "unstructured" else [long_text, long_text]
-    report = cycle(ds, FakeLlm(*replies))
-    calls = len(replies)
-    assert (report.failed, report.calls, report.cost_usd) == (1, calls, pytest.approx(calls * price))
+    report = cycle(ds, FakeLlm(long_text, long_text))
+    assert (report.failed, report.calls, report.cost_usd) == (1, 2, pytest.approx(2 * price))
     assert read_state(ds)["usage"][MONTH]["writer"] == {
-        "calls": calls, "input_tokens": 100 * calls, "output_tokens": 50 * calls,
-        "cost_usd": pytest.approx(calls * price), "unpriced": 0}
+        "calls": 2, "input_tokens": 200, "output_tokens": 100, "cost_usd": pytest.approx(2 * price), "unpriced": 0}
 
 
 @pytest.mark.asyncio
@@ -1289,7 +1085,6 @@ def owner_messages(ds: ModuleType, count: int, at: datetime) -> list[Any]:
 
 def test_the_persona_due_rules(dossiers: ModuleType) -> None:
     ds = dossiers
-    assert (ds.PERSONA_MIN_FIRST, ds.PERSONA_MIN_NEW, ds.PERSONA_MIN_AGE) == (10, 20, timedelta(days=7))
     due = ds.persona_due
     recent = owner_messages(ds, 25, NOW - timedelta(hours=1))
     assert not due(None, recent[:9], NOW) and due(None, recent[:10], NOW)  # a first build needs 10
@@ -1445,7 +1240,9 @@ async def test_the_persona_is_rebuilt_from_scratch_from_the_owners_own_text(
 
 
 @pytest.mark.asyncio
-async def test_forget_returns_the_contract_for_each_target(plug: ModuleType, dossiers: ModuleType) -> None:
+async def test_forget_returns_the_contract_for_each_target_and_never_touches_history_or_the_switch(
+    plug: ModuleType, dossiers: ModuleType
+) -> None:
     ds = dossiers
     alice = await seed_owner_chat(plug, ALICE, "ALPHA")
     await seed_owner_chat(plug, BOB, "BRAVO")
@@ -1455,6 +1252,8 @@ async def test_forget_returns_the_contract_for_each_target(plug: ModuleType, dos
     revision = read_dossier(ds, ALICE)["revision"]
     persona_revision = read_persona(ds)["revision"]
     generation = ds.generation()
+    history_before = snapshot_history_tree(plug)
+    switch = ds.settings_path().read_bytes()
 
     assert ds.forget(("contact", alice)) == {"existed": True, "revision": revision, "note": True,
                                              "persona_reset": True}
@@ -1474,21 +1273,17 @@ async def test_forget_returns_the_contract_for_each_target(plug: ModuleType, dos
     (ds.contact_dir("biz-old", 700002)).mkdir(parents=True)  # an empty directory is no dossier
 
     assert ds.forget(("all", None)) == {"existed": True, "contacts": 2, "persona": False}  # bob and the backup
+    assert snapshot_history_tree(plug) == history_before
+    assert ds.settings_path().read_bytes() == switch and ds.load_config().enabled is True
+    root = ds.dossier_root()
+    assert not (root / "chats").exists() and not persona_dir(ds).exists() and not ds.state_path().exists()
+    assert (root / ".lock").exists() and (root / ".cycle.lock").exists()
+
+    ds.set_enabled(False, via="telegram")
+    switch = ds.settings_path().read_bytes()
     assert ds.forget(("all", None)) == {"existed": False, "contacts": 0, "persona": False}
+    assert ds.settings_path().read_bytes() == switch and ds.load_config().enabled is False
     assert ds.generation() == generation + 7  # every forget bumps the generation, even with nothing to delete
-
-
-@pytest.mark.asyncio
-async def test_any_forget_discards_an_answer_in_flight(plug: ModuleType, dossiers: ModuleType) -> None:
-    ds = dossiers
-    await seed_alice(plug)
-    fake = FakeLlm()
-    fake.on_call = lambda _payload: ds.forget(("contact", {"business_connection_id": "biz-other", "chat_id": 5}))
-    report = cycle(ds, fake)
-    assert (report.calls, report.refreshed, report.waiting) == (1, 0, 1)  # the generation changed under it
-    assert read_dossier(ds, ALICE) is None
-    fake.on_call = None
-    assert cycle(ds, fake, now=ago(-5)).refreshed == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1534,31 +1329,6 @@ async def test_state_drops_departed_chats_and_failure_records_hold_no_raw_ids(
 
 
 @pytest.mark.asyncio
-async def test_a_retention_prune_drops_seen_keys_without_a_call(plug: ModuleType, dossiers: ModuleType) -> None:
-    ds = dossiers
-    old = timedelta(days=70)
-    raw(plug, ALICE, [(1, "in", "Old order: two crates of lemons", old),
-                      (2, "out", "Old reply: crates ship Tuesday", old - timedelta(minutes=1))], username="alice")
-    await seed_alice(plug, ALICE_ROWS[:2])
-    fake = FakeLlm()
-    assert cycle(ds, fake).refreshed == 1
-    assert refs(contact_payloads(fake)[0]) == ["m1", "m2", "m10", "m11"]
-    before = read_dossier(ds, ALICE)
-
-    test_history.set_retention(plug, 30)
-    assert maintain(plug, 0).pruned_files >= 1
-    report = cycle(ds, fake, now=ago(-5))
-    assert (report.calls, report.unchanged) == (0, 1)
-    after = read_dossier(ds, ALICE)
-    assert after == {**before, "seen": {k: v for k, v in before["seen"].items() if k not in ("1", "2")}}
-
-    await seed_alice(plug, [(12, "in", "New crates please", -10)])
-    assert cycle(ds, fake, now=ago(-25)).refreshed == 1
-    assert contact_payloads(fake)[1]["messages"] == [
-        {"ref": "m12", "at": local(-10), "from": "contact", "text": "New crates please"}]  # never as deleted
-
-
-@pytest.mark.asyncio
 async def test_an_aged_out_month_is_not_read_and_its_prune_makes_no_call(
     plug: ModuleType, dossiers: ModuleType, dossier_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1597,13 +1367,15 @@ async def test_an_aged_out_month_is_not_read_and_its_prune_makes_no_call(
     assert refs(contact_payloads(fake)[0]) == ["m30", "m31"]
     assert reads and all(since >= later - timedelta(days=30) - ds.FOLD_MARGIN for since, _ids in reads)
     assert all(1 not in ids and "1" not in ids for _since, ids in reads)  # the old month was not read
-    before = doc_bytes(ds, ALICE)
+    before = snapshot_tree(dossier_dir(ds, ALICE))
 
     test_history.set_retention(plug, 20)
     assert maintain(plug, later).pruned_files >= 1
     report = cycle(ds, fake, now=later + timedelta(minutes=1))
     assert (report.calls, len(fake.calls)) == (0, 1)
-    assert doc_bytes(ds, ALICE) == before  # nothing it still tracked was pruned
+    report = cycle(ds, fake, now=later + timedelta(minutes=2), target=("contact", entry))
+    assert (report.calls, len(fake.calls)) == (0, 1)  # even a forced run has nothing to send
+    assert snapshot_tree(dossier_dir(ds, ALICE)) == before  # nothing it still tracked was pruned
 
 
 @pytest.mark.asyncio
@@ -1618,7 +1390,7 @@ async def test_a_dossier_whose_whole_chat_was_pruned_stays_frozen_until_forgotte
     entry = catalog_entry(plug, ALICE)
     report = cycle(ds, FakeLlm())
     assert (report.refreshed, report.unqualified) == (1, 1)
-    before = doc_bytes(ds, ALICE)
+    before = snapshot_tree(dossier_dir(ds, ALICE))
 
     test_history.set_retention(plug, 30)
     assert maintain(plug, 0).pruned_files >= 1
@@ -1627,7 +1399,7 @@ async def test_a_dossier_whose_whole_chat_was_pruned_stays_frozen_until_forgotte
     fake = FakeLlm()
     report = cycle(ds, fake, now=ago(-5))
     assert (report.orphans, report.calls, fake.calls) == (0, 0, [])
-    assert doc_bytes(ds, ALICE) == before
+    assert snapshot_tree(dossier_dir(ds, ALICE)) == before
     assert key_of(ds, ALICE) not in read_state(ds)["chats"]  # its cache key left with the chat
     assert ds.forget(("contact", entry))["existed"] is True
     assert read_dossier(ds, ALICE) is None

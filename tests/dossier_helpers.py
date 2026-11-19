@@ -26,7 +26,6 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
-from model_fakes import FakeOpener
 from test_history import (
     ROOT,
     FakeBot,
@@ -51,7 +50,6 @@ __all__ = [
     "FakeBot",
     "FakeCtx",
     "FakeLlm",
-    "FakeOpener",
     "ago",
     "append_raw_history_records",
     "catalog_entry",
