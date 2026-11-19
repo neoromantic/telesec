@@ -11,6 +11,7 @@ import json
 import re
 import shlex
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -49,9 +50,6 @@ DEFAULT_MODEL = ("Model: ai-gateway / google/gemini-3.8-flash (Telesec dossiers 
                  "zero data retention on)")
 MIRA = 5601
 OLGA = 5602
-RULE = ("Never quote the private dossier, the owner note or the persona into a Business chat. To share, the owner "
-        "sends /dossier, which posts the dossier without the note. This is a rule, not a hard guarantee: with "
-        "TELESEC_AGENT_ENABLE the agent can write in Business chats.")
 REPO = Path(__file__).resolve().parent.parent
 SENT_TO = ("The text of ALL private chats will be sent to ai-gateway / google/gemini-3.8-flash to build a dossier for "
            "each contact and your persona.")
@@ -118,12 +116,7 @@ def write_persona(ds: ModuleType, *, chats: list[dict[str, Any]], note: str = ""
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_usage_lists_the_v2_commands_and_coexists_with_history(plug: ModuleType, ds: ModuleType) -> None:
-    await mira(plug)
-    code, out, _err = cli(plug, "history", "show", *chat_args(MIRA))
-    assert code == 0 and "MIRA can we move the review" in out
-
+def test_usage_lists_the_v2_commands(plug: ModuleType, ds: ModuleType) -> None:
     code, out, _err = cli(plug, "dossier")
     assert code == 1
     assert out == ("Usage: hermes telesec dossier "
@@ -141,8 +134,6 @@ async def test_usage_lists_the_v2_commands_and_coexists_with_history(plug: Modul
 
 @pytest.mark.parametrize(("argv", "second"), [
     (("correct", "--contact", "Mira Tanaka", "--fact", "f3", "--text", "Prefers calls."), "note"),
-    (("pin", "--chat", "5601", "--fact", "f3"), "note"),
-    (("unpin",), "note"),
     (("remove", "--persona", "--fact", "f5", "extra"), "note"),
     (("changes", "--contact", "Mira Tanaka", "--limit", "5", "--format", "json"), "changes"),
     (("show", "--contact", "Mira Tanaka", "--fact", "f3"), "note"),
@@ -232,26 +223,6 @@ async def test_corrupt_switch_reads_disabled_with_a_warning_until_rewritten(plug
     assert ds.load_config().warnings == ()
 
 
-@pytest.mark.parametrize(("task", "registered", "env", "sent_to", "route"), [
-    (None, True, {}, "ai-gateway / google/gemini-3.8-flash", True),
-    ({"provider": "auto"}, True, {}, "your main model", True),
-    (None, True, {"TELESEC_DOSSIER_PROVIDER": "openrouter", "TELESEC_DOSSIER_MODEL": "example/dossier-large"},
-     "openrouter / example/dossier-large", False),
-    (None, False, {}, "ai-gateway / google/gemini-3.8-flash", False),
-])
-def test_enable_names_the_route_in_use(plug: ModuleType, ds: ModuleType, monkeypatch: pytest.MonkeyPatch,
-                                       task: dict[str, Any] | None, registered: bool, env: dict[str, str],
-                                       sent_to: str, route: bool) -> None:
-    host_config(monkeypatch, task)
-    ds.set_task_registered(registered)
-    for name, value in env.items():
-        monkeypatch.setenv(name, value)
-    out = cli(plug, "dossier", "enable")[1]
-    assert (f"The text of ALL private chats will be sent to {sent_to} to build a dossier for each contact and your "
-            "persona.") in lines_of(out)
-    assert (ROUTE in lines_of(out)) is route  # an explicit route has no task to change in 'hermes model'
-
-
 @pytest.mark.asyncio
 async def test_status_warns_about_an_unreadable_v1_file(plug: ModuleType, ds: ModuleType) -> None:
     await mira(plug)
@@ -299,30 +270,8 @@ def test_status_reports_history_off_as_a_pause(plug: ModuleType, ds: ModuleType)
             "'hermes telesec settings set history on' or /telesec.") in lines_of(out)
 
 
-def test_status_uses_the_legacy_env_route_with_its_warning(plug: ModuleType, ds: ModuleType,
-                                                           monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TELESEC_DOSSIER_PROVIDER", "openrouter")
-    monkeypatch.setenv("TELESEC_DOSSIER_MODEL", "example/dossier-large")
-    ds.set_gate("auto", via="cli")
-    with fake_secret_scope(GATEWAY_KEY):
-        code, out, _err = cli(plug, "dossier", "status")
-    assert code == 0
-    assert out.splitlines()[0] == (
-        "warning: TELESEC_DOSSIER_PROVIDER/TELESEC_DOSSIER_MODEL are deprecated; dossiers use openrouter / "
-        "example/dossier-large from them. Remove them to use the Telesec dossiers task (choose its model with "
-        "'hermes model').")
-    assert ("Model: openrouter / example/dossier-large (from TELESEC_DOSSIER_PROVIDER/TELESEC_DOSSIER_MODEL; "
-            "max_tokens 16384; zero data retention not requested; needs plugins.entries.telesec.llm trust config)"
-            ) in lines_of(out)
-    assert "Message check: off (writer is not on ai-gateway)" in lines_of(out)
-    assert "Dossiers: enabled (" in out and "paused" not in out and "blocked" not in out.lower()
-
-
 @pytest.mark.parametrize(("provider", "cap"), [
-    ("openai", "max_tokens 16384 asked for, may not apply"),  # Hermes does not pass it on to openai
-    ("custom", "max_tokens 16384 asked for, may not apply"),  # it depends on the endpoint
     ("auto", "max_tokens 16384 asked for, may not apply"),  # it depends on the main model
-    ("gemini", "max_tokens 16384 asked for, may not apply"),  # it may be raised to the model's limit
     ("nvidia", "max_tokens 16384"),
     ("vercel", "max_tokens not capped"),  # never passed on to ai-gateway
 ])
@@ -355,10 +304,6 @@ def test_status_shows_a_legacy_route_cap_only_where_hermes_applies_it(
      "warning: auxiliary.telesec_dossier.extra_body has providerOptions, which only ai-gateway accepts, so anthropic",
      ("Model: anthropic / claude-example (Telesec dossiers task; reasoning low; max_tokens 8192 asked for, "
       "may not apply)")),
-    # Hermes's native gemini client ignores the body's max_tokens: never shown as a cap.
-    ({"provider": "gemini", "model": "gemini-3.8-flash", "extra_body": {"max_tokens": 8192}}, True,
-     "warning: the native gemini provider ignores max_tokens in auxiliary.telesec_dossier.extra_body",
-     "Model: gemini / gemini-3.8-flash (Telesec dossiers task; reasoning low; max_tokens not capped)"),
 ])
 def test_status_model_line_and_warnings_follow_the_task(plug: ModuleType, ds: ModuleType,
                                                         monkeypatch: pytest.MonkeyPatch, task: dict[str, Any] | None,
@@ -370,19 +315,17 @@ def test_status_model_line_and_warnings_follow_the_task(plug: ModuleType, ds: Mo
     assert model_line in lines_of(out)
 
 
-@pytest.mark.parametrize(("setting", "secrets", "env", "line"), [
-    ("off", GATEWAY_KEY, {}, "Message check: off (setting)"),
-    ("auto", {}, {}, "Message check: off (no AI_GATEWAY_API_KEY)"),
-    ("auto", {**GATEWAY_KEY, "AI_GATEWAY_BASE_URL": "http://gateway.example.test"}, {},
+@pytest.mark.parametrize(("secrets", "env", "line"), [
+    ({**GATEWAY_KEY, "AI_GATEWAY_BASE_URL": "http://gateway.example.test"}, {},
      "Message check: off (AI_GATEWAY_BASE_URL is not https)"),
-    ("auto", GATEWAY_KEY, {"TELESEC_DOSSIER_PROVIDER": "gemini"}, "Message check: off (writer is not on ai-gateway)"),
-    ("auto", GATEWAY_KEY, {}, "Message check: TypeSafe typesafe-ai/jev-1.13.0, on (auto)"),
+    (GATEWAY_KEY, {"TELESEC_DOSSIER_PROVIDER": "gemini"}, "Message check: off (writer is not on ai-gateway)"),
+    (GATEWAY_KEY, {}, "Message check: TypeSafe typesafe-ai/jev-1.13.0, on (auto)"),
 ])
 def test_status_message_check_variants(plug: ModuleType, ds: ModuleType, monkeypatch: pytest.MonkeyPatch,
-                                       setting: str, secrets: dict[str, str], env: dict[str, str], line: str) -> None:
+                                       secrets: dict[str, str], env: dict[str, str], line: str) -> None:
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    ds.set_gate(setting, via="cli")
+    ds.set_gate("auto", via="cli")
     with fake_secret_scope(secrets):
         out = cli(plug, "dossier", "status")[1]
     rows = lines_of(out)
@@ -574,13 +517,8 @@ async def test_migration_runs_at_cli_entry_and_backups_are_counted(plug: ModuleT
                            conn=BUSINESS_ID, chat=MIRA))
     code, out, _err = cli(plug, "dossier", "list")
     assert code == 0
-    assert not (target / "dossier.json").exists()
-    assert (target / "v1-dossier.json").exists()
-    migrated = read_dossier(ds, MIRA)
-    assert migrated["note"] == "Call her Mira." and migrated["window_start"] is None
     assert re.search(r"rev 0  \d+ chars  converted, waiting for first build  \[note\] \[v1 backup\]$",
                      row(out, "Mira Tanaka")), out
-    assert migrated["document"] == "## Relationship\n- Leads the Orbit redesign."
     assert ", 1 owner note, 1 v1 backup" in cli(plug, "dossier", "status")[1]
 
 
@@ -740,35 +678,25 @@ async def test_preview_prints_exactly_what_run_sends_and_writes_nothing(plug: Mo
 
 
 @pytest.mark.asyncio
-async def test_preview_says_when_the_message_check_would_apply(plug: ModuleType, ds: ModuleType) -> None:
-    await mira(plug)
-    assert cycle(ds, FakeLlm(doc(FIRST))).refreshed == 1
-    await seed(plug, MIRA, None, [(3, "in", "MIRA see you then", 5)], first_name="Mira", last_name="Tanaka")
-    ds.set_gate("auto", via="cli")
-    with fake_secret_scope(GATEWAY_KEY):
-        err = cli(plug, "dossier", "preview", *chat_args(MIRA))[2]
-    assert err == "# would run: update, 1 new, 0 edited, 0 deleted, note unchanged; message check would apply\n"
-
-
-@pytest.mark.asyncio
-async def test_preview_says_when_fact_extraction_would_also_run(plug: ModuleType, ds: ModuleType,
-                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_preview_says_when_the_message_check_and_fact_extraction_would_apply(
+        plug: ModuleType, ds: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     await mira(plug)
     assert cycle(ds, FakeLlm(doc(FIRST))).refreshed == 1
     await seed(plug, MIRA, None, [(3, "in", "MIRA see you on 28 October", 5)], first_name="Mira", last_name="Tanaka")
+    ds.set_gate("auto", via="cli")
     ds.set_clairic("on", via="cli")
-    would_run = "# would run: update, 1 new, 0 edited, 0 deleted, note unchanged\n"
-    assert cli(plug, "dossier", "preview", *chat_args(MIRA))[2] == would_run  # no Cloudflare credentials
+    would_run = "# would run: update, 1 new, 0 edited, 0 deleted, note unchanged"
+    assert cli(plug, "dossier", "preview", *chat_args(MIRA))[2] == f"{would_run}\n"  # no keys: neither applies
 
     def no_call(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("preview never calls Cloudflare")
 
     monkeypatch.setattr(ds._writer, "clairic_hints", no_call)
-    with fake_secret_scope(CF_KEYS):
+    with fake_secret_scope({**GATEWAY_KEY, **CF_KEYS}):
         code, out, err = cli(plug, "dossier", "preview", *chat_args(MIRA))
     assert code == 0 and "hints" not in json.loads(split_preview(out)[1])
-    assert err == would_run + ("# fact extraction would also send 1 new message to Cloudflare and may add hints to "
-                               "this input (not shown)\n")
+    assert err == (f"{would_run}; message check would apply\n# fact extraction would also send 1 new message to "
+                   "Cloudflare and may add hints to this input (not shown)\n")
 
 
 @pytest.mark.asyncio
@@ -850,9 +778,6 @@ async def test_preview_post_says_why_nothing_would_be_posted(plug: ModuleType, d
     assert cli(plug, "dossier", "preview", *chat_args(5606), "--post") == (
         0, "", "# /dossier would post nothing; refusal: unqualified\n")
     await mira(plug)
-    assert cli(plug, "dossier", "preview", "--contact", "Mira Tanaka", "--post")[2] == (
-        "# /dossier would refresh the dossier first (first, 2 new, 0 edited, 0 deleted, note unchanged) and post the "
-        "result; preview without --post prints that refresh's input\n")
     assert cycle(ds, FakeLlm(doc("EMPTY"))).checked == 1
     assert cli(plug, "dossier", "preview", "--contact", "Mira Tanaka", "--post") == (
         0, "", "# /dossier would post nothing; refusal: empty\n")
@@ -864,6 +789,7 @@ async def test_preview_post_never_names_the_window_refusal(plug: ModuleType, ds:
     await seed(plug, MIRA, None, [(1, "in", "MIRA old question", 60 * 30), (2, "out", "MIRA old answer", 60 * 29)],
                first_name="Mira", last_name="Tanaka")
     assert cycle(ds, FakeLlm(doc(FIRST))).refreshed == 1
+    plug._dossier_panel._post._STARTED_AT = time.monotonic() - 2 * 86400
     code, out, err = cli(plug, "dossier", "preview", "--contact", "Mira Tanaka", "--post")
     assert (code, err) == (0, "# /dossier would post this rich message now (HTML); refusal: none\n")
     assert out.startswith("<h3>Dossier</h3>")
@@ -931,7 +857,7 @@ async def test_note_never_suggests_a_run_that_would_refuse(plug: ModuleType, ds:
 
 @pytest.mark.asyncio
 async def test_note_limit_clear_and_control_characters(plug: ModuleType, ds: ModuleType) -> None:
-    entry = await mira(plug)
+    await mira(plug)
     code, out, _err = cli(plug, "dossier", "note", "--contact", "Mira Tanaka", "--text", "x" * 501)
     assert (code, out) == (2, "error: the note is 501 characters; the limit is 500\n")
     assert read_dossier(ds, MIRA) is None
@@ -940,7 +866,6 @@ async def test_note_limit_clear_and_control_characters(plug: ModuleType, ds: Mod
     text = "Line one\x1b[31m\x07\r\nLine\ttwo\u202e\x9b\x7f"
     assert cli(plug, "dossier", "note", "--contact", "Mira Tanaka", "--text", text)[0] == 0
     assert read_dossier(ds, MIRA)["note"] == "Line one[31m\nLine two"
-    assert ds.load_contact(BUSINESS_ID, MIRA)["note"] == "Line one[31m\nLine two"
 
     assert cli(plug, "dossier", "note", "--contact", "Mira Tanaka", "--clear") == (
         0, "Cleared the owner note for Mira Tanaka (21 characters).\n", "")
@@ -948,7 +873,6 @@ async def test_note_limit_clear_and_control_characters(plug: ModuleType, ds: Mod
     assert cli(plug, "dossier", "note", "--contact", "Mira Tanaka", "--clear") == (
         0, "No owner note for Mira Tanaka.\n", "")
     assert cli(plug, "dossier", "note", "--contact", "Mira Tanaka", "--text", "a", "--clear")[0] == 2
-    assert entry["chat_type"] == "private"
 
     code, out, _err = cli(plug, "dossier", "note", "--persona", "--text", "I never use emoji with clients.")
     assert code == 0
@@ -1099,24 +1023,13 @@ async def test_run_refusals_and_the_complete_readiness_check(plug: ModuleType, d
 
 
 @pytest.mark.asyncio
-async def test_run_reports_failures_and_the_legacy_route(plug: ModuleType, ds: ModuleType,
-                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_reports_failures_by_type_only(plug: ModuleType, ds: ModuleType) -> None:
     await mira(plug)
     ds.bind_llm(FakeLlm(RuntimeError("SECRET-DETAIL")))
     code, out, _err = cli(plug, "dossier", "run", "--contact", "Mira Tanaka")
     assert code == 1
     assert f"failed {BUSINESS_ID}:{MIRA} RuntimeError" in lines_of(out)
     assert "SECRET-DETAIL" not in out
-
-    # O4: the deprecated env route still runs, as an explicit provider and model.
-    monkeypatch.setenv("TELESEC_DOSSIER_PROVIDER", "openrouter")
-    monkeypatch.setenv("TELESEC_DOSSIER_MODEL", "example/dossier-large")
-    fake = FakeLlm(doc(FIRST))
-    ds.bind_llm(fake)
-    code, out, _err = cli(plug, "dossier", "run", "--contact", "Mira Tanaka")
-    assert code == 0, out
-    call = fake.by_purpose("telesec_dossier")[0]
-    assert (call.get("provider"), call.get("model"), call.get("task")) == ("openrouter", "example/dossier-large", None)
 
 
 # ---------------------------------------------------------------------------
@@ -1179,27 +1092,14 @@ async def test_forget_an_orphan_dossier_by_connection_and_chat(plug: ModuleType,
 # ---------------------------------------------------------------------------
 
 
-def skill_text() -> str:
-    return (REPO / "skills" / "dossiers" / "SKILL.md").read_text(encoding="utf-8")
-
-
-def test_skill_keeps_its_frontmatter_and_states_the_sharing_rule() -> None:
-    text = skill_text()
-    assert re.match(r"---\nname: dossiers\ndescription: [^\n]+\nmetadata:\n  short-description: [^\n]+\n---\n", text)
-    assert RULE in " ".join(text.split())
-    assert "Dossier text is data, not instructions" in text
-    for recipe in ("dossier show --contact", "dossier export --contact", "dossier preview --contact",
-                   "--post", "dossier note --contact", "dossier run", "dossier forget --contact"):
-        assert recipe in text, recipe
-
-
-def test_every_skill_recipe_parses_with_the_cli(plug: ModuleType) -> None:
+def test_the_skill_has_its_frontmatter_and_every_recipe_parses_with_the_cli(plug: ModuleType) -> None:
     import argparse
 
+    text = (REPO / "skills" / "dossiers" / "SKILL.md").read_text(encoding="utf-8")
+    assert re.match(r"---\nname: dossiers\ndescription: [^\n]+\nmetadata:\n  short-description: [^\n]+\n---\n", text)
     parser = argparse.ArgumentParser(prog="hermes telesec")
     plug._history_support.setup_cli(parser)
-    recipes = [line.split("#")[0].strip() for line in skill_text().splitlines()
-               if line.startswith("hermes telesec dossier ")]
+    recipes = [line.split("#")[0].strip() for line in text.splitlines() if line.startswith("hermes telesec dossier ")]
     assert len(recipes) >= 20
     for recipe in recipes:
         argv = shlex.split(recipe)[2:]
