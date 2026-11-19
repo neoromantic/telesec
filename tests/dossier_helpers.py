@@ -17,7 +17,6 @@ import itertools
 import json
 import sys
 import threading
-import time
 import types
 import uuid
 from collections.abc import Callable, Iterable
@@ -80,6 +79,7 @@ __all__ = [
     "seed",
     "snapshot_history_tree",
     "snapshot_tree",
+    "spy_switch_checks",
     "spy_worker_cycles",
     "wait_until",
     "wait_worker_cycle",
@@ -595,6 +595,9 @@ def wait_worker_cycle(ds: ModuleType, timeout: float = 5.0) -> Any:
     return workers[0]
 
 
+_SPIED = threading.Condition()  # notified whenever a worker spy below records something
+
+
 def spy_worker_cycles(monkeypatch: Any, ds: ModuleType) -> list[str]:
     """Record the outcome of every ``run_cycle`` the worker makes, in order."""
     outcomes: list[str] = []
@@ -602,21 +605,35 @@ def spy_worker_cycles(monkeypatch: Any, ds: ModuleType) -> list[str]:
 
     def spy(**kwargs: Any) -> Any:
         report = real(**kwargs)
-        outcomes.append(report.outcome)
+        with _SPIED:
+            outcomes.append(report.outcome)
+            _SPIED.notify_all()
         return report
 
     monkeypatch.setattr(ds, "run_cycle", spy)
     return outcomes
 
 
-def wait_until(predicate: Callable[[], bool], timeout: float = 5.0, interval: float = 0.01) -> bool:
-    """Poll ``predicate`` until it is true or ``timeout`` seconds pass; returns its last value."""
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() >= deadline:
-            return predicate()
-        time.sleep(interval)
-    return True
+def spy_switch_checks(monkeypatch: Any, ds: ModuleType) -> list[bool]:
+    """Record every switch check the worker makes, in order: True when dossiers were on."""
+    checks: list[bool] = []
+    real = ds._config_if_on
+
+    def spy() -> Any:
+        cfg = real()
+        with _SPIED:
+            checks.append(cfg is not None)
+            _SPIED.notify_all()
+        return cfg
+
+    monkeypatch.setattr(ds, "_config_if_on", spy)
+    return checks
+
+
+def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """Wait until ``predicate`` over what the worker spies record is true, or ``timeout`` seconds pass."""
+    with _SPIED:
+        return _SPIED.wait_for(predicate, timeout)
 
 
 class FakeCtx:

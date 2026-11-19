@@ -8,6 +8,7 @@ recording fake, plus one run through real PTB 22.8 dispatch and request serializ
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import json
 import logging
@@ -44,6 +45,7 @@ from dossier_helpers import (
     read_settings,
     seed,
     snapshot_tree,
+    spy_switch_checks,
     spy_worker_cycles,
     wait_until,
 )
@@ -220,6 +222,24 @@ def watch_refresh(panel: Any, monkeypatch: pytest.MonkeyPatch) -> threading.Even
 
     monkeypatch.setattr(panel._post, "refresh", refresh)
     return done
+
+
+def wall_cap(monkeypatch: pytest.MonkeyPatch) -> Callable[[], None]:
+    """Each ``/dossier`` wall cap runs out only when the test calls the returned function; an ended cap stays ended."""
+    caps, real = [], asyncio.timeout
+
+    def timeout(_delay: float | None) -> asyncio.Timeout:
+        caps.append(real(None))
+        return caps[-1]
+
+    def run_out() -> None:
+        now = asyncio.get_running_loop().time()
+        for cap in caps:
+            with contextlib.suppress(RuntimeError):  # the cap has ended
+                cap.reschedule(now)
+
+    monkeypatch.setattr(asyncio, "timeout", timeout)
+    return run_out
 
 
 # ---------------------------------------------------------------------------
@@ -457,10 +477,12 @@ async def test_switch_wakes_an_idle_worker_and_old_switch_buttons_write_nothing(
     ds = dossier_history._dossier_support
     monkeypatch.setattr(ds, "INITIAL_DELAY_SECONDS", 0)
     outcomes = spy_worker_cycles(monkeypatch, ds)
+    checks = spy_switch_checks(monkeypatch, ds)
     ds.bind_llm(FakeLlm())
     try:
         assert ds.ensure_worker_started()
-        assert not wait_until(lambda: outcomes, timeout=0.3)  # off: the worker idles
+        assert wait_until(lambda: checks, timeout=5)
+        assert checks == [False] and outcomes == []  # off: the worker idles
 
         for stale in ("ea", "ed", "ds"):  # Enable/Disable on a panel sent before the switch moved to Settings
             view = await act(panel, stale)
@@ -1078,14 +1100,18 @@ async def test_wall_cap_tells_the_owner_and_stops_the_build(plug, ds, panel, mon
     llm, release, entered = holding_llm(LONG_DOCUMENT)
     ds.bind_llm(llm)
     refreshed = watch_refresh(panel, monkeypatch)
-    monkeypatch.setattr(panel._post, "POST_WALL_SECONDS", 0.2)
+    run_out = wall_cap(monkeypatch)
     bot = PanelBot()
     try:
-        assert await run_command(panel, command_update(), bot)
+        assert await panel.handle_dossier_command_update(command_update(), bot=bot, adapter=None,
+                                                         mark_seen=lambda _key: True)
+        assert await asyncio.to_thread(entered.wait, 5)
+        run_out()
+        await panel.join_posts()
     finally:
         release.set()
 
-    assert entered.is_set() and posts(bot) == []
+    assert posts(bot) == []
     assert [sent["text"] for sent in bot.sent] == [f"{HEAD}\nThe dossier could not be prepared (timeout)."]
     assert await asyncio.to_thread(refreshed.wait, 5)
     assert [call["purpose"] for call in llm.calls] == ["telesec_dossier"]  # no shorten call after the cap
@@ -1095,16 +1121,24 @@ async def test_wall_cap_tells_the_owner_and_stops_the_build(plug, ds, panel, mon
 async def test_wall_cap_never_cuts_a_send_that_has_started(plug, ds, panel, monkeypatch):
     await build(plug, ds)
     ds.bind_llm(FakeLlm(doc(DOCUMENT)))
-    monkeypatch.setattr(panel._post, "POST_WALL_SECONDS", 0.5)
+    run_out = wall_cap(monkeypatch)
+    sending, answer = asyncio.Event(), asyncio.Event()
 
     class SlowBot(PanelBot):
         async def do_api_request(self, endpoint: str, api_kwargs: dict[str, Any] | None = None, **kwargs: Any) -> Any:
             sent = await super().do_api_request(endpoint, api_kwargs, **kwargs)
-            await asyncio.sleep(0.5)  # Telegram has the post; its answer comes after the cap
+            sending.set()
+            await answer.wait()  # Telegram has the post; its answer comes after the cap
             return sent
 
     bot = SlowBot()
-    assert await run_command(panel, command_update(), bot)
+    assert await panel.handle_dossier_command_update(command_update(), bot=bot, adapter=None,
+                                                     mark_seen=lambda _key: True)
+    await asyncio.wait_for(sending.wait(), 5)
+    run_out()
+    await asyncio.sleep(0)  # a cap still in force cancels the send here
+    answer.set()
+    await panel.join_posts()
 
     assert len(posts(bot)) == 1 and bot.sent == []  # the owner is never told that nothing was posted
     assert plug._history_support._is_control_message(BUSINESS_ID, CHAT, 900)

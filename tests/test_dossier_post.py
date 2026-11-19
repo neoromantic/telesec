@@ -391,10 +391,14 @@ async def test_the_refresh_waits_for_another_cycle_and_stops_when_told(plug, ds,
     assert outcomes == [] and len(llm.calls) == 1
 
     outcomes.extend(["busy"] * 1000)
-    stop = threading.Event()
-    threading.Timer(0.05, stop.set).start()
-    assert post.refresh(entry, llm=llm, stop=stop) == ("failed", "stopped")
-    assert len(llm.calls) == 1
+
+    class ToldWhileWaiting(threading.Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            self.set()
+            return super().wait(timeout)
+
+    assert post.refresh(entry, llm=llm, stop=ToldWhileWaiting()) == ("failed", "stopped")
+    assert len(outcomes) == 999 and len(llm.calls) == 1
 
 
 @pytest.mark.parametrize(("report", "expected"), [
