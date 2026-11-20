@@ -1,12 +1,12 @@
 manifest_version: 2
 name: telesec
-version: 0.19.1
+version: 0.19.2
 description: "Telesec — Telegram Business secretary for Hermes."
 author: neoromantic
 license: MIT
 homepage: https://telesec.sergeybaus.com
 tags: [telegram, business, voice, history, groups]
-requires_hermes: ">=0.21.6,<=0.23.2"
+requires_hermes: ">=0.21.6,<=0.23.3"
 kind: standalone
 provides_hooks:
   - pre_gateway_dispatch
