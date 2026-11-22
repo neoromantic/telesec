@@ -171,7 +171,7 @@ hermes telesec settings set retention forever
 hermes telesec settings --format json   # retention.days, 0 is forever
 ```
 
-`settings set retention N` takes any number of days from 0 to 36500. The value is stored in `settings.json` and read by every maintenance run, so a change needs no restart. Maintenance (the cleanup) runs when the gateway starts, when any `hermes` command loads Telesec (such as `hermes telesec history show`), and at most once an hour when a Business update arrives, also while history is off. So a shorter retention can delete months at the next `hermes telesec` command, not only in the gateway.
+`settings set retention N` takes any number of days from 0 to 36500. The value is stored in `settings.json` and read by every maintenance run, so a change needs no restart. Maintenance (the cleanup) runs in a background thread once the gateway connects to Telegram (once per gateway run, not again on a reconnect), at most once an hour when a Business update arrives, also while history is off, and when you run `hermes telesec history maintain`. Other `hermes` commands, and loading the plugin, do not run it. So a shorter retention deletes months in the gateway or at an explicit `maintain`.
 
 Automatic retention and size pruning remove whole closed monthly partitions. Partitions follow observation time. A month is deleted once all of it is older than the retention: with 30 days, September goes at the first cleanup on or after October 31. The current month and partitions needed for pending deletion classification are preserved, so neither retention nor `TELESEC_HISTORY_MAX_BYTES` is a hard storage ceiling. The contact catalog is rebuilt from retained evidence after pruning.
 

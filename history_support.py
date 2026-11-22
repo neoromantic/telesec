@@ -101,6 +101,8 @@ _TRANSCRIPT_CLEANUPS: dict[tuple[str, str, str], dict[str, Any]] = {}
 # it for deletion alerts.
 _DELETION_LISTENER: Callable[[dict[str, Any], MessageState | None], None] | None = None
 _LAST_MAINTENANCE_AT: datetime | None = None
+# History roots whose gateway startup maintenance has started in this process.
+_STARTUP_MAINTENANCE_ROOTS: set[str] = set()
 # The owner's `/dossier` commands and the dossiers the bot posted: kept out of history, so their
 # deletion is control traffic too. Insertion-ordered, bounded, per process.
 _CONTROL_MESSAGES: dict[tuple[str, str, str], None] = {}
@@ -3013,14 +3015,17 @@ async def observe_ptb_update(update: Any, *, bot: Any = None, now: datetime | No
 async def _maintain_if_due(current: datetime) -> None:
     if not history_root().exists() or not _should_run_throttled_maintenance(current):
         return
-    maintenance = await asyncio.to_thread(maintain_history, now=current)
-    if maintenance.cap_exceeded:
+    _log_maintenance(await asyncio.to_thread(maintain_history, now=current))
+
+
+def _log_maintenance(result: MaintenanceResult) -> None:
+    if result.cap_exceeded:
         logger.warning(
             "%s: history size cap exceeded by %d bytes; non-prunable history files were preserved",
             PLUGIN_NAME,
-            maintenance.cap_shortfall_bytes,
+            result.cap_shortfall_bytes,
         )
-    for warning in maintenance.warnings:
+    for warning in result.warnings:
         logger.warning("%s: %s", PLUGIN_NAME, warning)
 
 
@@ -3241,6 +3246,32 @@ async def _capture_update(update: Any, *, bot: Any, current: datetime, direction
 
 def run_startup_maintenance(*, now: datetime | None = None) -> MaintenanceResult:
     return maintain_history(now=now)
+
+
+def start_startup_maintenance() -> None:
+    """Run maintenance once per history root in a gateway thread, off plugin load and the event loop.
+
+    Reconnects are no-ops. It counts as the hourly run, so Business updates meanwhile do not start another;
+    after a failure the next hourly run retries.
+    """
+    global _LAST_MAINTENANCE_AT
+    root = str(history_root())
+    with _CACHE_LOCK:
+        if root in _STARTUP_MAINTENANCE_ROOTS:
+            return
+        _STARTUP_MAINTENANCE_ROOTS.add(root)
+        _LAST_MAINTENANCE_AT = _utcnow()
+    threading.Thread(target=copy_context().run, args=(_run_startup_maintenance,),
+                     name="telesec-history-maintenance", daemon=True).start()
+
+
+def _run_startup_maintenance() -> None:
+    try:
+        result = run_startup_maintenance()
+    except Exception as exc:
+        logger.warning("%s: startup history maintenance failed: %s", PLUGIN_NAME, exc, exc_info=True)
+        return
+    _log_maintenance(result)
 
 
 def _parse_time_bound(value: str | None, *, option_name: str) -> datetime | None:
@@ -4139,6 +4170,7 @@ def reset_in_memory_caches() -> None:
         _CHAT_STATE_CACHE.clear()
         _CONTROL_MESSAGES.clear()
         _LAST_MAINTENANCE_AT = None
+        _STARTUP_MAINTENANCE_ROOTS.clear()
     for entry in timer_entries:
         entry.timer.cancel()
     _OWNER_CACHE.clear()
