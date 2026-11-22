@@ -20,7 +20,7 @@ Release check: deploy the tag to the maintainer's running Hermes gateway, restar
 
 ## 0.19.3 fix: plugin load timeout, 2026-11-23
 
-Cause, measured by the maintainer on a copy of a 100-chat history (no messages were read for this record): plugin load ran history maintenance before it returned and took about 4 s alone, 8.4–8.7 s with two loads at once, and 12.4–12.9 s with three. Hermes drops a plugin whose load takes more than 10 s, which explains the `load timed out after 10s` warnings in the [0.19.0 record](#0190-release-and-live-checks-2026-11-16).
+Cause, measured by the maintainer on an isolated copy of a large history (no messages were read for this record): plugin load ran history maintenance before it returned and took about 4 s alone, 8.4–8.7 s with two loads at once, and 12.4–12.9 s with three. Hermes drops a plugin whose load takes more than 10 s, which explains the `load timed out after 10s` warnings in the [0.19.0 record](#0190-release-and-live-checks-2026-11-16).
 
 Fix: maintenance moved from plugin load to a background thread that starts after the gateway wires its Telegram handlers, once per history directory and process. Offline evidence, synthetic data only (`tests/test_history.py`):
 
@@ -28,7 +28,17 @@ Fix: maintenance moved from plugin load to a background thread that starts after
 - `test_gateway_start_recovers_deletions_and_applies_retention_after_restart`: after a restart, gateway start classifies an overdue deletion once and removes a month older than the retention.
 - Explicit `hermes telesec history maintain`, delayed classification timers, the size cap, and pending deletion alerts keep their existing tests.
 
-Before the PR, the full suite passed locally (1711 tests, 1 skipped) and ruff was clean. Live deploy and the controlled live smoke are pending.
+Before the PR, the full suite passed locally (1711 tests, 1 skipped) and ruff was clean, and CI passed on Python 3.14.
+
+### Release and deploy
+
+Released as `v0.19.3` (`3f09e3fc4bc13f61e42ac5d0f7d50e516a51f714`). One gateway on Hermes 0.22.6 got a plugin-only update to the exact commit and restarted; Hermes, its config, and the stored settings were not changed.
+
+- **Load timeout: pass.** On the same isolated history copy, with Hermes's own plugin loader, five starts at once: with 0.19.2 all five loads timed out; with 0.19.3 all five had the plugin enabled, and full plugin discovery took 1.10–1.25 s.
+- **Startup: pass.** The plugin's native Telegram handlers were wired. The background history maintenance thread started after that and finished about 4.5 s later. Gateway health was OK, and Telegram was connected.
+- **Cron: pass.** Two scheduled script-only cron jobs ran at the same time and finished, with every expected plugin enabled.
+- **Dossiers: pass.** From the restart to the first scheduled dossier cycle the log has no new Telesec warnings or errors; the cycle had no failures and needed no model calls.
+- **Not run.** No Telegram messages were sent for this release, so the Business and group media paths were not exercised live; the code they use did not change. Other gateways were not updated.
 
 ## 0.19.2 release and deploy: 2026-11-20
 
