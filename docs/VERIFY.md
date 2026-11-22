@@ -18,6 +18,18 @@ Group checks (`tests/test_group_media.py`, real PTB updates) must show that only
 
 Release check: deploy the tag to the maintainer's running Hermes gateway, restart it, check that the plugin's handlers are wired and the error log has no plugin lines, then run the [controlled live smoke](#controlled-live-smoke). A clean isolated `hermes plugins validate --install-deps` runs only when asked; the plugin may import only the standard library, PTB, and Hermes core dependencies, so a long-running gateway with extra packages cannot hide a missing one.
 
+## 0.19.3 fix: plugin load timeout, 2026-11-23
+
+Cause, measured by the maintainer on a copy of a 100-chat history (no messages were read for this record): plugin load ran history maintenance before it returned and took about 4 s alone, 8.4–8.7 s with two loads at once, and 12.4–12.9 s with three. Hermes drops a plugin whose load takes more than 10 s, which explains the `load timed out after 10s` warnings in the [0.19.0 record](#0190-release-and-live-checks-2026-11-16).
+
+Fix: maintenance moved from plugin load to a background thread that starts after the gateway wires its Telegram handlers, once per history directory and process. Offline evidence, synthetic data only (`tests/test_history.py`):
+
+- `test_startup_maintenance_runs_once_off_plugin_load_and_the_event_loop`: plugin load does not run maintenance; handler wiring returns while maintenance is still blocked, and maintenance never runs on the calling thread; a reconnect and a Business update during it start no second run; a failure is logged as a warning and the hourly run retries it. Threads are synchronized with events, not sleeps.
+- `test_gateway_start_recovers_deletions_and_applies_retention_after_restart`: after a restart, gateway start classifies an overdue deletion once and removes a month older than the retention.
+- Explicit `hermes telesec history maintain`, delayed classification timers, the size cap, and pending deletion alerts keep their existing tests.
+
+Before the PR, the full suite passed locally (1711 tests, 1 skipped) and ruff was clean. Live deploy and the controlled live smoke are pending.
+
 ## 0.19.2 release and deploy: 2026-11-20
 
 Released as `v0.19.2` (`36bcb469d9e4631eff9548529cad7ce02cec81a8`): only `requires_hermes` changed, to `<=0.23.3` (check below). CI passed on Python 3.14 (1710 tests, 1 skipped). The same two Hermes 0.22.6 gateways as for 0.19.1 got a plugin-only update to the exact commit and restarted; Hermes, its config, and the stored settings were not changed. On both, `hermes plugins list` showed 0.19.2 enabled, the plugin's native Telegram handlers were wired, and the error log had no new Telesec lines, including no load timeout. The code is the same as 0.19.0, so the live Business and group checks were not repeated. No live gateway runs Hermes 0.23.3 yet; 0.23.3 support rests on the local check below.

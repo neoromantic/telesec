@@ -554,6 +554,7 @@ def _register_telegram_handlers(app: Any, adapter: Any) -> None:
         BusinessConnectionHandler(on_business_connection_update, block=True), group=_RAW_HISTORY_HANDLER_GROUP
     )
     app.add_handler(GroupMediaHandler(on_group_media, block=True), group=_RAW_HISTORY_HANDLER_GROUP)
+    _history_support.start_startup_maintenance()
     _dossier_support.ensure_worker_started()
     _usage_stats.started()
 
@@ -3947,16 +3948,3 @@ def register(ctx: Any) -> None:
         on_unload(_dossier_panel.stop_background)
     _dossier_panel.register_owner_panel_section(
         _owner_panel, seen_connections=lambda: [*(c for c, _ in list(_PANEL_SEEN_CHATS)), *list(_PANEL_KNOWN_CONNECTIONS)])
-    try:
-        result = _history_support.run_startup_maintenance()
-    except Exception as exc:
-        logger.warning("%s: startup history maintenance failed: %s", _PLUGIN_NAME, exc, exc_info=True)
-        return
-    if result.cap_exceeded:
-        logger.warning(
-            "%s: history size cap exceeded by %d bytes; non-prunable history files were preserved",
-            _PLUGIN_NAME,
-            result.cap_shortfall_bytes,
-        )
-    for warning in result.warnings:
-        logger.warning("%s: %s", _PLUGIN_NAME, warning)

@@ -895,8 +895,6 @@ def test_the_rule_is_stored_once_across_restarts_and_processes(cs, plugin, monke
 
 def test_register_stores_the_rule_once_then_warns_on_each_start(cs, plugin, monkeypatch, caplog):
     monkeypatch.setenv("TELESEC_HISTORY_CHATS", "992")
-    monkeypatch.setattr(plugin._history_support, "run_startup_maintenance",
-                        Mock(return_value=SimpleNamespace(cap_exceeded=False, warnings=[])))
     ctx = SimpleNamespace(llm=None, get_config={}.get, register_telegram_handler=Mock(), register_hook=Mock(),
                           register_cli_command=Mock(), register_skill=Mock())
 
@@ -918,8 +916,6 @@ def test_register_stores_the_rule_once_then_warns_on_each_start(cs, plugin, monk
 @pytest.mark.asyncio
 async def test_without_the_variables_the_migration_is_a_no_op(cs, history_enabled, monkeypatch, caplog):
     plugin = history_enabled  # the production case: none of the three variables is set
-    monkeypatch.setattr(plugin._history_support, "run_startup_maintenance",
-                        Mock(return_value=SimpleNamespace(cap_exceeded=False, warnings=[])))
     ctx = SimpleNamespace(llm=None, get_config={}.get, register_telegram_handler=Mock(), register_hook=Mock(),
                           register_cli_command=Mock(), register_skill=Mock())
 

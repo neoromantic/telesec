@@ -89,6 +89,8 @@ class MultiOwnerBot(PanelBot):
 
 
 def panel_handler(plugin):
+    """The owner panel handler, wired without the gateway's startup history maintenance."""
+    plugin._history_support.start_startup_maintenance = lambda: None
     handlers = []
     app = SimpleNamespace(add_handler=lambda handler, group: handlers.append((handler, group)))
     plugin._register_telegram_handlers(app, ttm.command_adapter(PanelBot()))

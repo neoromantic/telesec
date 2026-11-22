@@ -131,6 +131,8 @@ def gateway_for(event, bot):
 
 
 def registered_business_handler(plugin, adapter):
+    """The Business handler's callback, wired without the gateway's startup history maintenance."""
+    plugin._history_support.start_startup_maintenance = lambda: None
     handlers = []
     app = SimpleNamespace(add_handler=lambda handler, group: handlers.append((handler, group)))
     plugin._register_telegram_handlers(app, adapter)

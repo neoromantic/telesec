@@ -40,8 +40,6 @@ def test_first_start_migrates_all_private_files_and_config_idempotently(plugin, 
     config = {"plugins": {"enabled": [old_id, "other"], "disabled": [], "entries": {old_id: entry}},
               "unrelated": {"keep": "value"}}
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(config))
-    monkeypatch.setattr(plugin._history_support, "run_startup_maintenance",
-                        Mock(return_value=SimpleNamespace(cap_exceeded=False, warnings=[])))
     ctx = SimpleNamespace(llm=None, get_config={}.get, register_telegram_handler=Mock(), register_hook=Mock(),
                           register_cli_command=Mock(), register_skill=Mock())
 

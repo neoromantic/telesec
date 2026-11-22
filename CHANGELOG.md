@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.19.3 - 2026-11-23
+
+- Fix: loading Telesec could time out. Plugin load ran the history maintenance (deletion classification, retention, and the size cap) before returning, and Hermes drops a plugin whose load takes more than 10 seconds. On a large history, with several Hermes processes loading the plugin at once, load passed that limit; the `load timed out after 10s` warning in the [0.19.0 record](docs/VERIFY.md#0190-release-and-live-checks-2026-11-16) came from this. Maintenance now starts in a background thread after the gateway wires its Telegram handlers, once per gateway run, and a reconnect does not start it again. It counts as the hourly run, so Business updates meanwhile do not start a second one; if it fails, the gateway logs a warning and the next hourly run retries. Loading the plugin and `hermes` commands other than `hermes telesec history maintain` no longer run maintenance, so a shorter retention now applies in the gateway or at an explicit `maintain`. Deletion recovery, pending deletion alerts, retention, and the size cap work as before. [Retention](docs/HISTORY.md#retention-and-removal).
+
 ## 0.19.2 - 2026-11-20
 
 - Hermes 0.23.3 support: `requires_hermes` is now `>=0.21.6,<=0.23.3`. Hermes 0.23.3 came out after 0.19.1, and its loader skipped Telesec 0.19.1 because of the old `<=0.23.2` bound. No code changes: a local Hermes 0.23.3 gateway loaded Telesec and ran the Business and group paths against a fake Telegram Bot API with synthetic data ([record](docs/VERIFY.md#hermes-0233-local-gateway-check-2026-11-20)). It was not run against live Telegram. Speech-to-text still calls Hermes's internal `tools.transcription_tools`; 0.23.3 still has it, and its planned move (NousResearch/hermes-agent#156570) is not released. [#118](https://github.com/neoromantic/telesec/issues/118) stays open.

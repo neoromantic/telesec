@@ -1838,12 +1838,27 @@ async def test_identical_pre_delete_message_outside_nearby_before_window_is_unex
     assert classifications[-1].get("replacement_message_id") is None
 
 
+def gateway_start(plugin) -> threading.Thread:
+    """Wire the Telegram handlers as Hermes does when the adapter connects; returns the maintenance thread."""
+    before = set(threading.enumerate())
+    plugin._register_telegram_handlers(SimpleNamespace(add_handler=lambda handler, group: None),
+                                       SimpleNamespace(platform="telegram", _bot=FakeBot()))
+    return next(thread for thread in set(threading.enumerate()) - before
+                if thread.name == "telesec-history-maintenance")
+
+
 @pytest.mark.asyncio
-async def test_deleted_message_classification_survives_restart(plugin, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+async def test_gateway_start_recovers_deletions_and_applies_retention_after_restart(
+        plugin, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     set_switch(plugin, "history", True)
     monkeypatch.setenv("TELESEC_HISTORY_CORRECTION_WINDOW", "10")
     base = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
 
+    await plugin._history_support.observe_ptb_update(
+        make_business_text_update(text="A June message", message_id=50, update_id=0, date=base - timedelta(days=40)),
+        bot=FakeBot(),
+        now=base - timedelta(days=40),
+    )
     await plugin._history_support.observe_ptb_update(
         make_business_text_update(text="Please call me back", message_id=77, update_id=1, date=base),
         bot=FakeBot(),
@@ -1855,19 +1870,65 @@ async def test_deleted_message_classification_survives_restart(plugin, monkeypat
         now=base + timedelta(seconds=1),
     )
 
-    reloaded = _load_plugin_module(monkeypatch, tmp_path)
-    await reloaded._history_support.observe_ptb_update(
+    await plugin._history_support.observe_ptb_update(
         make_business_text_update(text="Please call me back", message_id=88, update_id=3, date=base),
         bot=FakeBot(),
         now=base + timedelta(seconds=5),
     )
-    result = reloaded._history_support.run_startup_maintenance(now=base + timedelta(seconds=20))
+    set_retention(plugin, 1)
+    june_file = load_history_file(plugin, month="2026-06.jsonl")
+    assert june_file.exists()
+
+    reloaded = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setattr(reloaded._history_support, "_utcnow", lambda: base + timedelta(seconds=20))
+    gateway_start(reloaded).join(timeout=30)
     records = load_records(reloaded)
     classifications = [record for record in records if record["event_type"] == "deletion.classified"]
 
-    assert result.classified == 1
+    assert len(classifications) == 1
     assert classifications[-1]["classification"] == "likely_duplicate"
+    assert not june_file.exists()
     assert classifications[-1]["replacement_message_id"] == 88
+
+
+@pytest.mark.asyncio
+async def test_startup_maintenance_runs_once_off_plugin_load_and_the_event_loop(
+        enabled_history, monkeypatch: pytest.MonkeyPatch, caplog):
+    plugin, history = enabled_history, enabled_history._history_support
+    started = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    monkeypatch.setattr(history, "_utcnow", lambda: started)
+    history.history_root().mkdir(parents=True, exist_ok=True)
+    entered, release, calls = threading.Event(), threading.Event(), []
+
+    def maintain(*, now=None):
+        calls.append(now)
+        if threading.current_thread() is threading.main_thread():
+            raise RuntimeError("maintenance ran on the event loop thread")
+        if len(calls) > 1:
+            return history.MaintenanceResult()
+        entered.set()
+        release.wait()
+        raise OSError("synthetic lock failure")
+
+    monkeypatch.setattr(history, "maintain_history", maintain)
+    plugin.register(SimpleNamespace(llm=None, get_config={}.get, register_telegram_handler=lambda callback: None,
+                                    register_hook=lambda name, callback: None, register_cli_command=lambda **_: None,
+                                    register_skill=lambda *_: None))
+    assert calls == []
+
+    thread = gateway_start(plugin)  # returns while maintenance still runs
+    assert entered.wait(timeout=30)
+    plugin._register_telegram_handlers(SimpleNamespace(add_handler=lambda handler, group: None),
+                                       SimpleNamespace(platform="telegram", _bot=FakeBot()))  # a reconnect
+    await history._maintain_if_due(started + timedelta(minutes=59))  # a Business update meanwhile
+    with caplog.at_level("WARNING"):
+        release.set()
+        thread.join(timeout=30)
+    assert len(calls) == 1
+    assert "startup history maintenance failed: synthetic lock failure" in caplog.text
+
+    await history._maintain_if_due(started + timedelta(hours=1))  # the hourly run retries
+    assert len(calls) == 2
 
 
 @pytest.mark.asyncio
